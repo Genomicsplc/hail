@@ -1,6 +1,7 @@
 from hail.java import *
 from hail.representation import Variant
 
+
 class LDMatrix:
     """
     Represents a symmetric matrix encoding the Pearson correlation between each pair of variants in the accompanying variant list.
@@ -16,7 +17,7 @@ class LDMatrix:
         :rtype: list of Variant
         """
         jvars = self._jldm.variants()
-        return list(map(lambda jrep: Variant._from_java(jrep), jvars))
+        return [Variant._from_java(jrep) for jrep in jvars]
 
     def matrix(self):
         """

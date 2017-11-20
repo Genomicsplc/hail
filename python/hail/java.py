@@ -5,6 +5,7 @@ from threading import Thread
 
 import py4j
 from decorator import decorator
+from hail.py3_compat import *
 
 
 class FatalError(Exception):

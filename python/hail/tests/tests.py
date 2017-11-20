@@ -5,7 +5,9 @@ from __future__ import print_function  # Python 2 and 3 print compatibility
 
 import unittest
 
-from hail import HailContext, KeyTable, VariantDataset, LDMatrix
+import sys
+from hail import HailContext, KeyTable, VariantDataset
+
 from hail.representation import *
 
 from hail.expr import *
@@ -16,6 +18,7 @@ import time
 from hail.keytable import desc
 import os
 import shutil
+from hail.py3_compat import *
 
 hc = None
 
@@ -176,7 +179,7 @@ class ContextTests(unittest.TestCase):
              .count())
 
             dataset.filter_intervals(Interval.parse('1:100-end')).count()
-            dataset.filter_intervals(map(Interval.parse, ['1:100-end', '3-22'])).count()
+            dataset.filter_intervals(list(map(Interval.parse, ['1:100-end', '3-22']))).count()
 
             (dataset.filter_variants_table(KeyTable.import_interval_list(test_resources + '/annotinterall.interval_list'))
              .count())
@@ -543,7 +546,8 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(first3[2].Sample, 'HG00099')
         self.assertTrue(all(x.Status == 'CASE' for x in first3))
 
-        self.assertEqual(range(10), [x.index for x in KeyTable.range(10).collect()])
+        self.assertEqual(list(range(100)), [x.index for x in KeyTable.range(100).collect()])
+
         self.assertTrue(KeyTable.range(200).indexed('foo').forall('index == foo'))
 
         stuff = (KeyTable.range(10)
@@ -792,7 +796,7 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(vds.annotate_global(path, i1, itype).globals.annotation, i1)
         self.assertEqual(vds.annotate_global(path, i2, itype).globals.annotation, i2)
 
-        l1 = 5L
+        l1 = long(5)
         l2 = None
         ltype = TLong()
         self.assertEqual(vds.annotate_global(path, l1, ltype).globals.annotation, l1)
@@ -905,11 +909,12 @@ class ContextTests(unittest.TestCase):
     def test_hadoop_methods(self):
         data = ['foo', 'bar', 'baz']
         data.extend(map(str, range(100)))
+        data = [bytearray(d, encoding="utf8") for d in data]
 
         with hadoop_write('/tmp/test_out.txt') as f:
             for d in data:
                 f.write(d)
-                f.write('\n')
+                f.write(b'\n')
 
         with hadoop_read('/tmp/test_out.txt') as f:
             data2 = [line.strip() for line in f]
@@ -919,7 +924,7 @@ class ContextTests(unittest.TestCase):
         with hadoop_write('/tmp/test_out.txt.gz') as f:
             for d in data:
                 f.write(d)
-                f.write('\n')
+                f.write(b'\n')
 
         with hadoop_read('/tmp/test_out.txt.gz') as f:
             data3 = [line.strip() for line in f]
