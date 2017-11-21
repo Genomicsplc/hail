@@ -134,7 +134,7 @@ def handle_py4j(func, *args, **kwargs):
 class LoggingTCPHandler(socketserver.StreamRequestHandler):
     def handle(self):
         for line in self.rfile:
-            sys.stderr.write(line.encode('utf8'))
+            sys.stderr.write(line.decode('utf8'))
 
 
 class SimpleServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
