@@ -95,19 +95,18 @@ class HailContext(object):
         # do this at the end in case something errors, so we don't raise the above error without a real HC
         Env._hc = self
 
-        sys.stderr.write(bytes('Running on Apache Spark version {}\n'.format(self.sc.version), 'utf-8'))
+        print('Running on Apache Spark version {}\n'.format(self.sc.version))
         if self._jsc.uiWebUrl().isDefined():
-            sys.stderr.write(bytes('SparkUI available at {}\n'.format(self._jsc.uiWebUrl().get()), 'utf-8'))
+            print('SparkUI available at {}\n'.format(self._jsc.uiWebUrl().get()))
 
         if not quiet:
             connect_logger('localhost', 12888)
 
-        sys.stderr.write(
-            bytes('Welcome to\n'
+        print('Welcome to\n'
             '     __  __     <>__\n'
             '    / /_/ /__  __/ /\n'
             '   / __  / _ `/ / /\n'
-            '  /_/ /_/\_,_/_/_/   version {}\n'.format(self.version),'utf-8'))
+            '  /_/ /_/\_,_/_/_/   version {}\n'.format(self.version))
 
     @staticmethod
     def get_running():

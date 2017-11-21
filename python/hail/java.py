@@ -134,7 +134,7 @@ def handle_py4j(func, *args, **kwargs):
 class LoggingTCPHandler(socketserver.StreamRequestHandler):
     def handle(self):
         for line in self.rfile:
-            sys.stderr.write(bytes(line, 'utf-8'))
+            print(line)
 
 
 class SimpleServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -170,8 +170,7 @@ def connect_logger(host, port):
             tries += 1
 
             if tries >= max_tries:
-                sys.stderr.write(
-                    bytes('WARNING: Could not find a free port for logger, maximum retries {} exceeded.'.format(max_tries), 'utf-8'))
+                print('WARNING: Could not find a free port for logger, maximum retries {} exceeded.'.format(max_tries))
                 return
 
     t = Thread(target=server.serve_forever, args=())
