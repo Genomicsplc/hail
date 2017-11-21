@@ -131,7 +131,7 @@ def handle_py4j(func, *args, **kwargs):
     return r
 
 
-class LoggingTCPHandler(SocketServer.StreamRequestHandler):
+class LoggingTCPHandler(socketserver.StreamRequestHandler):
     def handle(self):
         for line in self.rfile:
             sys.stderr.write(line)
