@@ -137,12 +137,12 @@ class LoggingTCPHandler(socketserver.StreamRequestHandler):
             sys.stderr.write(line)
 
 
-class SimpleServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
+class SimpleServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = True
     allow_reuse_address = True
 
     def __init__(self, server_address, handler_class):
-        SocketServer.TCPServer.__init__(self, server_address, handler_class)
+        socketserver.TCPServer.__init__(self, server_address, handler_class)
 
 
 def connect_logger(host, port):
