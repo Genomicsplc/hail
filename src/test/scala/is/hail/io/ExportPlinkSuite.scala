@@ -1,8 +1,9 @@
 package is.hail.io
 
 import is.hail.SparkSuite
-import is.hail.io.plink.FamFileConfig
-import is.hail.keytable.KeyTable
+import is.hail.io.plink.ExportPlink
+import is.hail.methods.SplitMulti
+import is.hail.table.Table
 import is.hail.utils._
 import org.testng.annotations.Test
 
@@ -29,9 +30,8 @@ class ExportPlinkSuite extends SparkSuite {
 
     val hailFile = tmpDir.createTempFile("hail")
 
-    val vds = hc.importVCF("src/test/resources/sample.vcf")
-      .splitMulti()
-    vds.exportPlink(hailFile)
+    val vds = SplitMulti(hc.importVCF("src/test/resources/sample.vcf"))
+    ExportPlink(vds, hailFile)
 
     rewriteBimIDs(hailFile + ".bim")
 
@@ -69,16 +69,17 @@ class ExportPlinkSuite extends SparkSuite {
   @Test def testFamExport() {
     val plink = tmpDir.createTempFile("mendel")
 
-    val vds = hc.importVCF("src/test/resources/mendel.vcf")
-      .splitMulti()
-      .hardCalls()
-      .annotateSamplesTable(KeyTable.importFam(hc, "src/test/resources/mendel.fam", delimiter = "\\\\s+"), expr = "sa.fam = table")
+    val vds = SplitMulti(hc.importVCF("src/test/resources/mendel.vcf"))
+      .annotateGenotypesExpr("g = {GT: g.GT}")
+      .annotateSamplesTable(Table.importFam(hc, "src/test/resources/mendel.fam", delimiter = "\\\\s+"), expr = "sa.fam = table")
       .annotateSamplesExpr("sa = sa.fam")
       .annotateVariantsExpr("va = {rsid: str(v)}")
 
-    vds.exportPlink(plink,
+    ExportPlink(vds, plink,
       "famID = sa.famID, id = s, matID = sa.matID, patID = sa.patID, isFemale = sa.isFemale, isCase = sa.isCase")
 
-    assert(hc.importPlinkBFile(plink).same(vds))
+    assert(hc.importPlinkBFile(plink)
+      // .hardCalls()
+      .same(vds))
   }
 }

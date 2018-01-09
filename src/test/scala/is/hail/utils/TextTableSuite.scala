@@ -3,7 +3,7 @@ package is.hail.utils
 import is.hail.SparkSuite
 import is.hail.check._
 import is.hail.expr._
-import is.hail.variant.{VSMSubgen, VariantDataset, VariantSampleMatrix}
+import is.hail.variant.{GenomeReference, VSMSubgen, MatrixTable}
 import org.testng.annotations.Test
 
 import scala.io.Source
@@ -38,65 +38,64 @@ class TextTableSuite extends SparkSuite {
       "-129 -129 . 1230192 1:1:A:AAA false GRCH12.1:151515",
       "0 0 . gene123.1 1:100:A:* false GRCH12.1:123",
       "-200 -200.0 . 155.2 GRCH123.2:2:A:T true 1:2"
-    ), 3).map { x => WithContext(x, TextContext(x, "none", None)) }
+    ), 3).map { x => WithContext(x, Context(x, "none", None)) }
 
     val imputed = TextTableReader.imputeTypes(rdd, Array("1", "2", "3", "4", "5", "6", "7"), "\\s+", ".", null)
 
-    imputed.foreach(println)
     assert(imputed.sameElements(Array(
-      Some(TInt),
-      Some(TDouble),
+      Some(TInt32()),
+      Some(TFloat64()),
       None,
-      Some(TString),
-      Some(TVariant),
-      Some(TBoolean),
-      Some(TLocus)
+      Some(TString()),
+      Some(TVariant(GenomeReference.GRCh37)),
+      Some(TBoolean()),
+      Some(TLocus(GenomeReference.GRCh37))
     )))
 
     val (schema, _) = TextTableReader.read(sc)(Array("src/test/resources/variantAnnotations.tsv"),
       impute = true)
     assert(schema == TStruct(
-      "Chromosome" -> TInt,
-      "Position" -> TInt,
-      "Ref" -> TString,
-      "Alt" -> TString,
-      "Rand1" -> TDouble,
-      "Rand2" -> TDouble,
-      "Gene" -> TString))
+      "Chromosome" -> TInt32(),
+      "Position" -> TInt32(),
+      "Ref" -> TString(),
+      "Alt" -> TString(),
+      "Rand1" -> TFloat64(),
+      "Rand2" -> TFloat64(),
+      "Gene" -> TString()))
 
     val (schema2, _) = TextTableReader.read(sc)(Array("src/test/resources/variantAnnotations.tsv"),
-      types = Map("Chromosome" -> TString), impute = true)
+      types = Map("Chromosome" -> TString()), impute = true)
     assert(schema2 == TStruct(
-      "Chromosome" -> TString,
-      "Position" -> TInt,
-      "Ref" -> TString,
-      "Alt" -> TString,
-      "Rand1" -> TDouble,
-      "Rand2" -> TDouble,
-      "Gene" -> TString))
+      "Chromosome" -> TString(),
+      "Position" -> TInt32(),
+      "Ref" -> TString(),
+      "Alt" -> TString(),
+      "Rand1" -> TFloat64(),
+      "Rand2" -> TFloat64(),
+      "Gene" -> TString()))
 
     val (schema3, _) = TextTableReader.read(sc)(Array("src/test/resources/variantAnnotations.alternateformat.tsv"),
       impute = true)
     assert(schema3 == TStruct(
-      "Chromosome:Position:Ref:Alt" -> TVariant,
-      "Rand1" -> TDouble,
-      "Rand2" -> TDouble,
-      "Gene" -> TString))
+      "Chromosome:Position:Ref:Alt" -> TVariant(GenomeReference.GRCh37),
+      "Rand1" -> TFloat64(),
+      "Rand2" -> TFloat64(),
+      "Gene" -> TString()))
 
     val (schema4, _) = TextTableReader.read(sc)(Array("src/test/resources/sampleAnnotations.tsv"),
       impute = true)
     assert(schema4 == TStruct(
-      "Sample" -> TString,
-      "Status" -> TString,
-      "qPhen" -> TInt))
+      "Sample" -> TString(),
+      "Status" -> TString(),
+      "qPhen" -> TInt32()))
   }
 
   @Test def testAnnotationsReadWrite() {
     val outPath = tmpDir.createTempFile("annotationOut", ".tsv")
-    val p = Prop.forAll(VariantSampleMatrix.gen(hc, VSMSubgen.realistic)
-      .filter(vds => vds.countVariants > 0 && vds.vaSignature != TDouble)) { vds: VariantDataset =>
+    val p = Prop.forAll(MatrixTable.gen(hc, VSMSubgen.realistic)
+      .filter(vds => vds.countVariants > 0 && !vds.vaSignature.isOfType(TFloat64()))) { vds: MatrixTable =>
 
-      vds.exportVariants(outPath, "v = v, va = va", typeFile = true)
+      vds.variantsKT().export(outPath, typesFile = outPath + ".types")
 
       val types = Type.parseMap(hadoopConf.readFile(outPath + ".types")(Source.fromInputStream(_).mkString))
 
@@ -105,5 +104,9 @@ class TextTableSuite extends SparkSuite {
     }
 
     p.check()
+  }
+
+  @Test def testPipeDelimiter() {
+    assert(TextTableReader.splitLine("a|b", "|", '#').toSeq == Seq("a", "b"))
   }
 }

@@ -3,16 +3,16 @@ package is.hail.methods
 import is.hail.SparkSuite
 import is.hail.check.{Gen, Prop}
 import is.hail.utils._
-import is.hail.variant.{VSMSubgen, Variant, VariantSampleMatrix}
+import is.hail.testUtils._
+import is.hail.variant.{Genotype, VSMSubgen, Variant, MatrixTable}
 import org.apache.spark.SparkContext
 import org.testng.annotations.Test
 
 import scala.language._
 
-
 class ConcordanceSuite extends SparkSuite {
-  def gen(sc: SparkContext) = for (vds1 <- VariantSampleMatrix.gen(hc, VSMSubgen.plinkSafeBiallelic);
-    vds2 <- VariantSampleMatrix.gen(hc, VSMSubgen.plinkSafeBiallelic);
+  def gen(sc: SparkContext) = for (vds1 <- MatrixTable.gen(hc, VSMSubgen.plinkSafeBiallelic);
+    vds2 <- MatrixTable.gen(hc, VSMSubgen.plinkSafeBiallelic);
     scrambledIds1 <- Gen.shuffle(vds1.sampleIds).map(_.iterator);
     newIds2 <- Gen.parameterized { p =>
       Gen.const(vds2.sampleIds.map { id =>
@@ -30,8 +30,8 @@ class ConcordanceSuite extends SparkSuite {
         if (scrambledVariants1.hasNext && p.rng.nextUniform(0, 1) < .5) (v, scrambledVariants1.next()) else (v, v)
       }.toMap)
     }
-  ) yield (vds1, vds2.copy(sampleIds = newIds2,
-    rdd = vds2.rdd.map { case (v, (vaGS)) => (newVariantMapping(v), vaGS) }.toOrderedRDD))
+  ) yield (vds1, vds2.copyLegacy(sampleIds = newIds2,
+    rdd = vds2.rdd.map { case (v, (vaGS)) => (newVariantMapping(v), vaGS) }))
 
   //FIXME use SnpSift when it's fixed
   def readSampleConcordance(file: String): Map[String, IndexedSeq[IndexedSeq[Int]]] = {
@@ -113,7 +113,7 @@ class ConcordanceSuite extends SparkSuite {
   @Test def testNDiscordant() {
     val g = (for {i <- Gen.choose(-2, 2)
       j <- Gen.choose(-2, 2)} yield (i, j)).filter { case (i, j) => !(i == -2 && j == -2) }
-    val seqG = Gen.buildableOf[Array, (Int, Int)](g)
+    val seqG = Gen.buildableOf[Array](g)
 
     val comb = new ConcordanceCombiner
 
@@ -155,7 +155,7 @@ class ConcordanceSuite extends SparkSuite {
 
       val innerJoinSamples = innerJoin.map { case (k, v) => (k._2, v) }
         .aggregateByKey(new ConcordanceCombiner)({ case (comb, (g1, g2)) =>
-          comb.mergeBoth(g1.unboxedGT, g2.unboxedGT)
+          comb.mergeBoth(Genotype.unboxedGT(g1), Genotype.unboxedGT(g2))
           comb
         }, { case (comb1, comb2) => comb1.merge(comb2) })
         .map { case (s, comb) => (s, comb.toAnnotation.tail.map(_.tail)) }
@@ -163,13 +163,13 @@ class ConcordanceSuite extends SparkSuite {
 
       val innerJoinVariants = innerJoin.map { case (k, v) => (k._1, v) }
         .aggregateByKey(new ConcordanceCombiner)({ case (comb, (g1, g2)) =>
-          comb.mergeBoth(g1.unboxedGT, g2.unboxedGT)
+          comb.mergeBoth(Genotype.unboxedGT(g1), Genotype.unboxedGT(g2))
           comb
         }, { case (comb1, comb2) => comb1.merge(comb2) })
         .collectAsMap
         .mapValues(_.toAnnotation)
 
-      val (globals, samples, variants) = vds1.concordance(vds2)
+      val (globals, samples, variants) = CalculateConcordance(vds1, vds2)
 
       samples.rdd.collect().foreach { r =>
         assert(r.getAs[IndexedSeq[IndexedSeq[Long]]](2).apply(0).sum == uniqueVds2Variants)

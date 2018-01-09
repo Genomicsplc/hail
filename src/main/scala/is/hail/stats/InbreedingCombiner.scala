@@ -2,17 +2,17 @@ package is.hail.stats
 
 
 import is.hail.annotations.Annotation
-import is.hail.expr.{Field, TDouble, TLong, TStruct}
+import is.hail.expr.{Field, TFloat64, TInt64, TStruct}
 import is.hail.utils._
-import is.hail.variant.Genotype
+import is.hail.variant.{Call, Genotype}
 
 object InbreedingCombiner {
-  def signature = TStruct(Array(("Fstat", TDouble, "Inbreeding coefficient"),
-    ("nTotal", TLong, "Number of genotypes analyzed"),
-    ("nCalled", TLong, "number of genotypes with non-missing calls"),
-    ("expectedHoms", TDouble, "Expected number of homozygote calls"),
-    ("observedHoms", TLong, "Total number of homozygote calls observed")
-  ).zipWithIndex.map { case ((n, t, d), i) => Field(n, t, i, Map(("desc", d))) })
+  def signature = TStruct(
+    "Fstat" -> TFloat64(),
+    "nTotal" -> TInt64(),
+    "nCalled" -> TInt64(),
+    "expectedHoms" -> TFloat64(),
+    "observedHoms" -> TInt64())
 }
 
 class InbreedingCombiner extends Serializable {
@@ -21,13 +21,13 @@ class InbreedingCombiner extends Serializable {
   var observedHoms = 0L
   var total = 0L
 
-  def merge(gt:Genotype, af: Double): InbreedingCombiner = {
+  def merge(gt: Call, af: Double): InbreedingCombiner = {
     total += 1
-    if (gt.isCalled) {
+    if (gt != null) {
       nCalled += 1
       expectedHoms += 1 - (2 * af * (1 - af))
 
-      if (gt.isHomRef || gt.isHomVar)
+      if (Call.isHomRef(gt) || Call.isHomVar(gt))
         observedHoms += 1
     }
     this

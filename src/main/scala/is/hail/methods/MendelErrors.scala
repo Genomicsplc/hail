@@ -2,16 +2,14 @@ package is.hail.methods
 
 import is.hail.HailContext
 import is.hail.annotations.Annotation
-import is.hail.expr.{TInt, TString, TStruct, TVariant}
-import is.hail.keytable.KeyTable
-import is.hail.utils.{MultiArray2, _}
+import is.hail.expr.{TInt32, TString, TStruct, Type}
+import is.hail.table.Table
+import is.hail.utils._
 import is.hail.variant.CopyState._
 import is.hail.variant.GenotypeType._
 import is.hail.variant._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.Row
-
-import scala.collection.mutable
 
 case class MendelError(variant: Variant, trio: CompleteTrio, code: Int,
   gtKid: GenotypeType, gtDad: GenotypeType, gtMom: GenotypeType) {
@@ -46,26 +44,27 @@ case class MendelError(variant: Variant, trio: CompleteTrio, code: Int,
 
 object MendelErrors {
 
-  def getCode(gts: IndexedSeq[GenotypeType], copyState: CopyState): Int = {
-    (gts(1), gts(2), gts(0), copyState) match {
-      // (gtDad, gtMom, gtKid)
-      case (HomRef, HomRef, Het, Auto) => 2 // Kid is Het
-      case (HomVar, HomVar, Het, Auto) => 1
-      case (HomRef, HomRef, HomVar, Auto) => 5 // Kid is HomVar
-      case (HomRef, _, HomVar, Auto) => 3
-      case (_, HomRef, HomVar, Auto) => 4
-      case (HomVar, HomVar, HomRef, Auto) => 8 // Kid is HomRef
-      case (HomVar, _, HomRef, Auto) => 6
-      case (_, HomVar, HomRef, Auto) => 7
-      case (_, HomVar, HomRef, HemiX) => 9 // Kid is hemizygous
-      case (_, HomRef, HomVar, HemiX) => 10
-      case (HomVar, _, HomRef, HemiY) => 11
-      case (HomRef, _, HomVar, HemiY) => 12
-      case _ => 0 // No error
-    }
+  def getCode(probandGt: Int, motherGt: Int, fatherGt: Int, copyState: CopyState): Int =
+    (fatherGt, motherGt, probandGt, copyState) match {
+    case (0, 0, 1, Auto)  => 2  // Kid is Het
+    case (2, 2, 1, Auto)  => 1
+    case (0, 0, 2, Auto)  => 5  // Kid is HomVar
+    case (0, _, 2, Auto)  => 3
+    case (_, 0, 2, Auto)  => 4
+    case (2, 2, 0, Auto)  => 8  // Kid is HomRef
+    case (2, _, 0, Auto)  => 6
+    case (_, 2, 0, Auto)  => 7
+    case (_, 2, 0, HemiX) => 9  // Kid is hemizygous
+    case (_, 0, 2, HemiX) => 10
+    case (2, _, 0, HemiY) => 11
+    case (0, _, 2, HemiY) => 12
+    case _ => 0 // No error
   }
 
-  def apply(vds: VariantDataset, preTrios: IndexedSeq[CompleteTrio]): MendelErrors = {
+  def apply(vds: MatrixTable, preTrios: IndexedSeq[CompleteTrio]): MendelErrors = {
+    vds.requireUniqueSamples("mendel_errors")
+
+    val grLocal = vds.genomeReference
 
     val trios = preTrios.filter(_.sex.isDefined)
     val nSamplesDiscarded = preTrios.size - trios.size
@@ -73,52 +72,41 @@ object MendelErrors {
     if (nSamplesDiscarded > 0)
       warn(s"$nSamplesDiscarded ${ plural(nSamplesDiscarded, "sample") } discarded from .fam: sex of child is missing.")
 
-    val sampleTrioRoles = mutable.Map.empty[String, List[(Int, Int)]]
-    trios.zipWithIndex.foreach { case (t, ti) =>
-      sampleTrioRoles += (t.kid -> sampleTrioRoles.getOrElse(t.kid, List.empty[(Int, Int)]).::(ti, 0))
-      sampleTrioRoles += (t.knownDad -> sampleTrioRoles.getOrElse(t.knownDad, List.empty[(Int, Int)]).::(ti, 1))
-      sampleTrioRoles += (t.knownMom -> sampleTrioRoles.getOrElse(t.knownMom, List.empty[(Int, Int)]).::(ti, 2))
-    }
+    val trioMatrix = vds.trioMatrix(Pedigree(trios), completeTrios = true)
+    val rowType = trioMatrix.rowType
+    val nTrios = trioMatrix.nSamples
 
     val sc = vds.sparkContext
-    val sampleTrioRolesBc = sc.broadcast(sampleTrioRoles)
     val triosBc = sc.broadcast(trios)
     // all trios have defined sex, see filter above
     val trioSexBc = sc.broadcast(trios.map(_.sex.get))
 
-    val zeroVal: MultiArray2[GenotypeType] = MultiArray2.fill(trios.length, 3)(NoCall)
-
-    def seqOp(a: MultiArray2[GenotypeType], s: Annotation, g: Genotype): MultiArray2[GenotypeType] = {
-      sampleTrioRolesBc.value.get(s.asInstanceOf[String]).foreach(l => l.foreach { case (ti, ri) => a.update(ti, ri, g.gtType) })
-      a
-    }
-
-    def mergeOp(a: MultiArray2[GenotypeType], b: MultiArray2[GenotypeType]): MultiArray2[GenotypeType] = {
-      for ((i, j) <- a.indices)
-        if (b(i, j) != NoCall)
-          a(i, j) = b(i, j)
-      a
-    }
-
-    new MendelErrors(vds.hc, trios, vds.stringSampleIds,
-      vds
-        .aggregateByVariantWithKeys(zeroVal)(
-          (a, v, s, g) => seqOp(a, s, g),
-          mergeOp)
-        .flatMap { case (v, a) =>
-          a.rows.flatMap { case (row) => val code = getCode(row, v.copyState(trioSexBc.value(row.i)))
+    new MendelErrors(vds.hc, vds.vSignature, trios, vds.stringSampleIds,
+      trioMatrix.rdd2.mapPartitions { it =>
+        val view = new HardcallTrioGenotypeView(rowType, "GT")
+        it.flatMap { rv =>
+          view.setRegion(rv)
+          val v = Variant.fromRegionValue(rv.region, rowType.loadField(rv, 1))
+          Iterator.range(0, nTrios).flatMap { i =>
+            view.setGenotype(i)
+            val probandGt = if (view.hasProbandGT) view.getProbandGT else -1
+            val motherGt = if (view.hasMotherGT) view.getMotherGT else -1
+            val fatherGt = if (view.hasFatherGT) view.getFatherGT else -1
+            val code = getCode(probandGt, motherGt, fatherGt, v.copyState(trioSexBc.value(i), grLocal))
             if (code != 0)
-              Some(MendelError(v, triosBc.value(row.i), code, row(0), row(1), row(2)))
+              Some(MendelError(v, triosBc.value(i), code,
+                GenotypeType(probandGt), GenotypeType(fatherGt), GenotypeType(motherGt)))
             else
               None
           }
         }
-        .cache()
+
+      }.cache()
     )
   }
 }
 
-case class MendelErrors(hc: HailContext, trios: IndexedSeq[CompleteTrio],
+case class MendelErrors(hc: HailContext, vSig: Type, trios: IndexedSeq[CompleteTrio],
   sampleIds: IndexedSeq[String],
   mendelErrors: RDD[MendelError]) {
 
@@ -148,27 +136,27 @@ case class MendelErrors(hc: HailContext, trios: IndexedSeq[CompleteTrio],
       .reduceByKey((x, y) => (x._1 + y._1, x._2 + y._2))
   }
 
-  def mendelKT(): KeyTable = {
+  def mendelKT(): Table = {
     val signature = TStruct(
-      "fid" -> TString,
-      "s" -> TString,
-      "v" -> TVariant,
-      "code" -> TInt,
-      "error" -> TString)
+      "fid" -> TString(),
+      "s" -> TString(),
+      "v" -> vSig,
+      "code" -> TInt32(),
+      "error" -> TString())
 
     val rdd = mendelErrors.map { e => Row(e.trio.fam.orNull, e.trio.kid, e.variant, e.code, e.errorString) }
 
-    KeyTable(hc, rdd, signature, Array("s", "v"))
+    Table(hc, rdd, signature, Array("s", "v"))
   }
 
-  def fMendelKT(): KeyTable = {
+  def fMendelKT(): Table = {
     val signature = TStruct(
-      "fid" -> TString,
-      "father" -> TString,
-      "mother" -> TString,
-      "nChildren" -> TInt,
-      "nErrors" -> TInt,
-      "nSNP" -> TInt
+      "fid" -> TString(),
+      "father" -> TString(),
+      "mother" -> TString(),
+      "nChildren" -> TInt32(),
+      "nErrors" -> TInt32(),
+      "nSNP" -> TInt32()
     )
 
     val trioFamBc = sc.broadcast(trioFam)
@@ -180,16 +168,16 @@ case class MendelErrors(hc: HailContext, trios: IndexedSeq[CompleteTrio],
       Row(kids.flatMap(x => trioFamBc.value.get(x.head)).orNull, dad, mom, kids.map(_.length).getOrElse(0), n, nSNP)
     }
 
-    KeyTable(hc, rdd, signature, Array("fid"))
+    Table(hc, rdd, signature, Array("fid"))
   }
 
-  def iMendelKT(): KeyTable = {
+  def iMendelKT(): Table = {
 
     val signature = TStruct(
-      "fid" -> TString,
-      "s" -> TString,
-      "nError" -> TInt,
-      "nSNP" -> TInt
+      "fid" -> TString(),
+      "s" -> TString(),
+      "nError" -> TInt32(),
+      "nSNP" -> TInt32()
     )
 
     val trioFamBc = sc.broadcast(trios.iterator.flatMap { t =>
@@ -200,17 +188,17 @@ case class MendelErrors(hc: HailContext, trios: IndexedSeq[CompleteTrio],
 
     val rdd = nErrorPerIndiv.map { case (s, (n, nSNP)) => Row(trioFamBc.value.getOrElse(s, null), s, n, nSNP) }
 
-    KeyTable(hc, rdd, signature, Array("s"))
+    Table(hc, rdd, signature, Array("s"))
   }
 
-  def lMendelKT(): KeyTable = {
+  def lMendelKT(): Table = {
     val signature = TStruct(
-      "v" -> TVariant,
-      "nError" -> TInt
+      "v" -> vSig,
+      "nError" -> TInt32()
     )
 
     val rdd = nErrorPerVariant.map { case (v, l) => Row(v, l.toInt) }
 
-    KeyTable(hc, rdd, signature, Array("v"))
+    Table(hc, rdd, signature, Array("v"))
   }
 }

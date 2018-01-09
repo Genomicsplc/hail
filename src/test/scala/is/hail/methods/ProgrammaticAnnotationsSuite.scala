@@ -2,19 +2,20 @@ package is.hail.methods
 
 import is.hail.SparkSuite
 import is.hail.utils._
+import is.hail.testUtils._
 import org.testng.annotations.Test
 
 class ProgrammaticAnnotationsSuite extends SparkSuite {
 
   @Test def testSamples() {
-
-    val vds = hc.importVCF("src/test/resources/sample.vcf")
-      .cache()
-      .splitMulti()
-      .sampleQC()
+    var vds = hc.importVCF("src/test/resources/sample.vcf")
+    vds = SplitMulti(vds)
+    vds = SampleQC(vds)
+    vds = vds
       .annotateSamplesExpr(
         "sa.userdefined.missingness = (1 - sa.qc.callRate) * 100, sa.anotherthing = 5, " +
           "sa.`hi there i have spaces`.another = true")
+      .cache()
 
     val qCall = vds.querySA("sa.qc.callRate")._2
     val qMiss = vds.querySA("sa.userdefined.missingness")._2
@@ -29,13 +30,14 @@ class ProgrammaticAnnotationsSuite extends SparkSuite {
   }
 
   @Test def testVariants() {
-    val vds = hc.importVCF("src/test/resources/sample.vcf")
-      .cache()
-      .filterVariantsExpr("v.start == 10019093")
-      .splitMulti()
-      .variantQC()
+    var vds = hc.importVCF("src/test/resources/sample.vcf")
+    vds = vds.filterVariantsExpr("v.start == 10019093")
+    vds = SplitMulti(vds)
+    vds = VariantQC(vds)
+    vds = vds
       .annotateVariantsExpr(
         "va.a.b.c.d.e = va.qc.callRate * 100, va.a.c = if (va.filters.isEmpty) 1 else 0, va.`weird spaces name` = 5 / (va.qual - 5)")
+      .cache()
 
     val vaa = vds.variantsAndAnnotations.collect()
     val q = vds.queryVA("va.a.b.c.d.e")._2

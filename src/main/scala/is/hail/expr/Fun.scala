@@ -3,6 +3,8 @@ package is.hail.expr
 import is.hail.asm4s.Code
 
 sealed trait Fun {
+  def captureType(): Fun = this
+
   def retType: Type
 
   def subst(): Fun
@@ -12,6 +14,32 @@ sealed trait Fun {
 
 case class Transformation[T, U](f: T => U, fcode: Code[T] => CM[Code[U]]) extends (T => U) {
   def apply(t: T): U = f(t)
+}
+
+case class UnaryDependentFunCode[T, U](retType: Type, code: () => Code[T] => CM[Code[U]]) extends Fun {
+  override def captureType() = UnaryFunCode(retType, code())
+
+  def apply(ct: Code[T]): CM[Code[U]] =
+    throw new UnsupportedOperationException("must captureType first")
+
+  def subst() =
+    throw new UnsupportedOperationException("must captureType first")
+
+  def convertArgs(transformations: Array[Transformation[Any, Any]]): Fun =
+    throw new UnsupportedOperationException("must captureType first")
+}
+
+case class UnaryDependentFun[T, U](retType: Type, code: () => T => U) extends Fun {
+  override def captureType() = UnaryFun(retType, code())
+
+  def apply(t: T): U =
+    throw new UnsupportedOperationException("must captureType first")
+
+  def subst() =
+    throw new UnsupportedOperationException("must captureType first")
+
+  def convertArgs(transformations: Array[Transformation[Any, Any]]): Fun =
+    throw new UnsupportedOperationException("must captureType first")
 }
 
 case class UnaryFunCode[T, U](retType: Type, code: Code[T] => CM[Code[U]]) extends Fun with (Code[T] => CM[Code[U]]) {
@@ -53,6 +81,19 @@ case class BinaryFunCode[T, U, V](retType: Type, code: (Code[T], Code[U]) => CM[
   }
 }
 
+case class BinaryDependentFun[T, U, V](retType: Type, code: () => (T, U) => V) extends Fun {
+  override def captureType() = BinaryFun(retType, code())
+
+  def apply(t: T, u: U): V =
+    throw new UnsupportedOperationException("must captureType first")
+
+  def subst() =
+    throw new UnsupportedOperationException("must captureType first")
+
+  def convertArgs(transformations: Array[Transformation[Any, Any]]): Fun =
+    throw new UnsupportedOperationException("must captureType first")
+}
+
 case class Arity0Aggregator[T, U](retType: Type, ctor: () => TypedAggregator[U]) extends Fun {
   def subst() = Arity0Aggregator[T, U](retType.subst(), ctor)
 
@@ -61,6 +102,12 @@ case class Arity0Aggregator[T, U](retType: Type, ctor: () => TypedAggregator[U])
 
     Arity0Aggregator[T, U](retType, () => new TransformedAggregator(ctor(), transformations(0).f))
   }
+}
+
+case class Arity0DependentAggregator[T, U](retType: Type, ctor: () => (() => TypedAggregator[U])) extends Fun {
+  def subst() = Arity0Aggregator[T, U](retType.subst(), ctor())
+
+  def convertArgs(transformations: Array[Transformation[Any, Any]]): Fun = ???
 }
 
 class TransformedAggregator[T](val prev: TypedAggregator[T], transform: (Any) => Any) extends TypedAggregator[T] {
@@ -85,6 +132,12 @@ case class Arity1Aggregator[T, U, V](retType: Type, ctor: (U) => TypedAggregator
         transformations(0).f)
     })
   }
+}
+
+case class Arity1DependentAggregator[T, U, V](retType: Type, ctor: () => ((U) => TypedAggregator[V])) extends Fun {
+  def subst() = Arity1Aggregator[T, U, V](retType.subst(), ctor())
+
+  def convertArgs(transformations: Array[Transformation[Any, Any]]): Fun = ???
 }
 
 case class Arity3Aggregator[T, U, V, W, X](retType: Type, ctor: (U, V, W) => TypedAggregator[X]) extends Fun {
@@ -112,6 +165,13 @@ case class UnaryLambdaAggregator[T, U, V](retType: Type, ctor: ((Any) => Any) =>
 
 case class BinaryLambdaAggregator[T, U, V, W](retType: Type, ctor: ((Any) => Any, V) => TypedAggregator[W]) extends Fun {
   def subst() = BinaryLambdaAggregator[T, U, V, W](retType.subst(), ctor)
+
+  // conversion can't apply to function type
+  def convertArgs(transformations: Array[Transformation[Any, Any]]): Fun = ???
+}
+
+case class BinaryDependentLambdaAggregator[T, U, V, W](retType: Type, ctor: () => (((Any) => Any, V) => TypedAggregator[W])) extends Fun {
+  def subst() = BinaryLambdaAggregator[T, U, V, W](retType.subst(), ctor())
 
   // conversion can't apply to function type
   def convertArgs(transformations: Array[Transformation[Any, Any]]): Fun = ???
@@ -169,14 +229,37 @@ case class BinaryLambdaFun[T, U, V](retType: Type, f: (T, (Any) => Any) => V)
   def convertArgs(transformations: Array[Transformation[Any, Any]]): Fun = ???
 }
 
-case class Arity3LambdaFun[T, U, V, W](retType: Type, f: (T, (Any) => Any, V) => W)
+case class Arity3LambdaMethod[T, U, V, W](retType: Type, f: (T, (Any) => Any, V) => W)
   extends Fun with Serializable with ((T, (Any) => Any, V) => W) {
   def apply(t: T, u: (Any) => Any, v: V): W = f(t, u, v)
 
+  def subst() = Arity3LambdaMethod(retType.subst(), f)
+
+  def convertArgs(transformations: Array[Transformation[Any, Any]]): Fun = {
+    require(transformations.length == 3)
+
+    Arity3LambdaMethod[Any, Any, Any, Any](retType, (t, u, v) =>
+      f(transformations(0).f(t).asInstanceOf[T],
+        // conversion can't apply to function type
+        u,
+        transformations(2).f(v).asInstanceOf[V]))
+  }
+}
+
+case class Arity3LambdaFun[T, U, V, W](retType: Type, f: ((Any) => Any, U, V) => W)
+  extends Fun with Serializable with (((Any) => Any, U, V) => W) {
+  def apply(t: (Any) => Any, u: U, v: V): W = f(t, u, v)
+
   def subst() = Arity3LambdaFun(retType.subst(), f)
 
-  // conversion can't apply to function type
-  def convertArgs(transformations: Array[Transformation[Any, Any]]): Fun = ???
+  def convertArgs(transformations: Array[Transformation[Any, Any]]): Fun = {
+    require(transformations.length == 3)
+
+    Arity3LambdaFun[Any, Any, Any, Any](retType, (t, u, v) =>
+      f(t, // conversion can't apply to function type
+        transformations(1).f(u).asInstanceOf[U],
+        transformations(2).f(v).asInstanceOf[V]))
+  }
 }
 
 case class BinaryLambdaAggregatorTransformer[T, U, V](retType: Type, f: (CPS[Any], (Any) => Any) => CPS[V],
@@ -213,6 +296,19 @@ case class Arity3Special[T, U, V, W](retType: Type, f: (() => Any, () => Any, ()
   def convertArgs(transformations: Array[Transformation[Any, Any]]): Fun = ???
 }
 
+case class Arity3DependentFun[T, U, V, W](retType: Type, code: () => (T, U, V) => W) extends Fun {
+  override def captureType() = Arity3Fun(retType, code())
+
+  def apply(t: T, u: U, v: V): W =
+    throw new UnsupportedOperationException("must captureType first")
+
+  def subst() =
+    throw new UnsupportedOperationException("must captureType first")
+
+  def convertArgs(transformations: Array[Transformation[Any, Any]]): Fun =
+    throw new UnsupportedOperationException("must captureType first")
+}
+
 case class Arity4Fun[T, U, V, W, X](retType: Type, f: (T, U, V, W) => X) extends Fun with Serializable with ((T, U, V, W) => X) {
   def apply(t: T, u: U, v: V, w: W): X = f(t, u, v, w)
 
@@ -226,6 +322,19 @@ case class Arity4Fun[T, U, V, W, X](retType: Type, f: (T, U, V, W) => X) extends
       transformations(2).f(c).asInstanceOf[V],
       transformations(3).f(d).asInstanceOf[W]))
   }
+}
+
+case class Arity4DependentFun[T, U, V, W, X](retType: Type, code: () => (T, U, V, W) => X) extends Fun {
+  override def captureType() = Arity4Fun(retType, code())
+
+  def apply(t: T, u: U, v: V, w: W): X =
+    throw new UnsupportedOperationException("must captureType first")
+
+  def subst() =
+    throw new UnsupportedOperationException("must captureType first")
+
+  def convertArgs(transformations: Array[Transformation[Any, Any]]): Fun =
+    throw new UnsupportedOperationException("must captureType first")
 }
 
 case class Arity5Fun[T, U, V, W, X, Y](retType: Type, f: (T, U, V, W, X) => Y) extends Fun with Serializable with ((T, U, V, W, X) => Y) {
@@ -242,6 +351,19 @@ case class Arity5Fun[T, U, V, W, X, Y](retType: Type, f: (T, U, V, W, X) => Y) e
       transformations(3).f(d).asInstanceOf[W],
       transformations(4).f(e).asInstanceOf[X]))
   }
+}
+
+case class Arity5DependentFun[T, U, V, W, X, Y](retType: Type, code: () => (T, U, V, W, X) => Y) extends Fun {
+  override def captureType() = Arity5Fun(retType, code())
+
+  def apply(t: T, u: U, v: V, w: W, x: X): Y =
+    throw new UnsupportedOperationException("must captureType first")
+
+  def subst() =
+    throw new UnsupportedOperationException("must captureType first")
+
+  def convertArgs(transformations: Array[Transformation[Any, Any]]): Fun =
+    throw new UnsupportedOperationException("must captureType first")
 }
 
 case class Arity6Special[T, U, V, W, X, Y, Z](retType: Type, f: (() => Any, () => Any, () => Any, () => Any, () => Any, () => Any) => Z)

@@ -3,14 +3,14 @@ package is.hail.io.plink
 import is.hail.HailContext
 import is.hail.annotations._
 import is.hail.expr._
+import is.hail.io.vcf.LoadVCF
+import is.hail.rvd.OrderedRVD
 import is.hail.utils.StringEscapeUtils._
 import is.hail.utils._
 import is.hail.variant._
 import org.apache.hadoop
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.io.LongWritable
-
-import scala.collection.mutable
 
 case class SampleInfo(sampleIds: Array[String], annotations: IndexedSeq[Annotation], signatures: TStruct)
 
@@ -21,20 +21,20 @@ case class FamFileConfig(isQuantitative: Boolean = false,
 object PlinkLoader {
   def expectedBedSize(nSamples: Int, nVariants: Long): Long = 3 + nVariants * ((nSamples + 3) / 4)
 
-  val plinkSchema = TStruct(("rsid", TString))
+  val plinkSchema = TStruct(("rsid", TString()))
 
-  private def parseBim(bimPath: String, hConf: Configuration): Array[(Variant, String)] = {
+  private def parseBim(bimPath: String, hConf: Configuration, a2Reference: Boolean = true,
+    contigRecoding: Map[String, String] = Map.empty[String, String]): Array[(Variant, String)] = {
     hConf.readLines(bimPath)(_.map(_.map { line =>
       line.split("\\s+") match {
         case Array(contig, rsId, morganPos, bpPos, allele1, allele2) =>
-          val recodedContig = contig match {
-            case "23" => "X"
-            case "24" => "Y"
-            case "25" => "X"
-            case "26" => "MT"
-            case x => x
-          }
-          (Variant(recodedContig, bpPos.toInt, allele2, allele1), rsId)
+          val recodedContig = contigRecoding.getOrElse(contig, contig)
+
+          if (a2Reference)
+            (Variant(recodedContig, bpPos.toInt, allele2, allele1), rsId)
+          else
+            (Variant(recodedContig, bpPos.toInt, allele1, allele2), rsId)
+
         case other => fatal(s"Invalid .bim line.  Expected 6 fields, found ${ other.length } ${ plural(other.length, "field") }")
       }
     }.value
@@ -49,24 +49,20 @@ object PlinkLoader {
 
     val delimiter = unescapeString(ffConfig.delimiter)
 
-    val phenoSig = if (ffConfig.isQuantitative) ("qPheno", TDouble) else ("isCase", TBoolean)
+    val phenoSig = if (ffConfig.isQuantitative) ("qPheno", TFloat64()) else ("isCase", TBoolean())
 
-    val signature = TStruct(("famID", TString), ("patID", TString), ("matID", TString), ("isFemale", TBoolean), phenoSig)
+    val signature = TStruct(("famID", TString()), ("patID", TString()), ("matID", TString()), ("isFemale", TBoolean()), phenoSig)
 
-    val kidSet = mutable.Set[String]()
+    val idBuilder = new ArrayBuilder[String]
+    val structBuilder = new ArrayBuilder[Annotation]
 
     val m = hConf.readLines(filename) {
-      _.map(_.map { line =>
+      _.foreachLine { line =>
 
         val split = line.split(delimiter)
         if (split.length != 6)
           fatal(s"expected 6 fields, but found ${ split.length }")
         val Array(fam, kid, dad, mom, isFemale, pheno) = split
-
-        if (kidSet(kid))
-          fatal(s".fam sample name is not unique: $kid")
-        else
-          kidSet += kid
 
         val fam1 = if (fam != "0") fam else null
         val dad1 = if (dad != "0") dad else null
@@ -99,15 +95,18 @@ object PlinkLoader {
               case numericRegex() => fatal(s"Invalid case-control phenotype: `$pheno'. Control is `1', case is `2', missing is `0', `-9', `${ ffConfig.missingValue }', or non-numeric.")
               case _ => null
             }
-
-        (kid, Annotation(fam1, dad1, mom1, isFemale1, pheno1))
-      }.value).toIndexedSeq
+        idBuilder += kid
+        structBuilder += Annotation(fam1, dad1, mom1, isFemale1, pheno1)
+      }
     }
 
-    if (m.isEmpty)
+    val sampleIds = idBuilder.result()
+    LoadVCF.warnDuplicates(sampleIds)
+
+    if (sampleIds.isEmpty)
       fatal("Empty .fam file")
 
-    (m, signature)
+    (sampleIds.zip(structBuilder.result()), signature)
   }
 
   private def parseBed(hc: HailContext,
@@ -116,42 +115,90 @@ object PlinkLoader {
     sampleAnnotations: IndexedSeq[Annotation],
     sampleAnnotationSignature: Type,
     variants: Array[(Variant, String)],
-    nPartitions: Option[Int] = None): VariantDataset = {
+    nPartitions: Option[Int] = None,
+    a2Reference: Boolean = true,
+    gr: GenomeReference = GenomeReference.defaultReference): MatrixTable = {
 
     val sc = hc.sc
     val nSamples = sampleIds.length
     val variantsBc = sc.broadcast(variants)
     sc.hadoopConfiguration.setInt("nSamples", nSamples)
+    sc.hadoopConfiguration.setBoolean("a2Reference", a2Reference)
 
     val rdd = sc.hadoopFile(bedPath, classOf[PlinkInputFormat], classOf[LongWritable], classOf[PlinkRecord],
       nPartitions.getOrElse(sc.defaultMinPartitions))
 
-    val fastKeys = rdd.map { case (_, decoder) => variantsBc.value(decoder.getKey)._1 }
-    val variantRDD = rdd.map {
-      case (_, vr) =>
-        val (v, rsId) = variantsBc.value(vr.getKey)
-        (v, (Annotation(rsId), vr.getValue))
-    }.toOrderedRDD(fastKeys)
-
-    new VariantSampleMatrix(hc, VSMMetadata(
+    val metadata = VSMMetadata(
       saSignature = sampleAnnotationSignature,
       vaSignature = plinkSchema,
-      globalSignature = TStruct.empty,
-      wasSplit = true),
+      vSignature = TVariant(gr),
+      globalSignature = TStruct.empty(),
+      genotypeSignature = TStruct("GT" -> TCall()))
+
+    val matrixType = MatrixType(metadata)
+    val kType = matrixType.kType
+    val rowType = matrixType.rowType
+
+    val fastKeys = rdd.mapPartitions { it =>
+      val region = Region()
+      val rvb = new RegionValueBuilder(region)
+      val rv = RegionValue(region)
+
+      it.map { case (_, record) =>
+        val (v, _) = variantsBc.value(record.getKey)
+
+        region.clear()
+        rvb.start(kType)
+        rvb.startStruct()
+        rvb.addAnnotation(kType.fieldType(0), v.locus) // locus/pk
+        rvb.addAnnotation(kType.fieldType(1), v)
+        rvb.endStruct()
+
+        rv.setOffset(rvb.end())
+        rv
+      }
+    }
+
+    val rdd2 = rdd.mapPartitions { it =>
+      val region = Region()
+      val rvb = new RegionValueBuilder(region)
+      val rv = RegionValue(region)
+
+      it.map { case (_, record) =>
+        val (v, rsid) = variantsBc.value(record.getKey)
+
+        region.clear()
+        rvb.start(rowType)
+        rvb.startStruct()
+        rvb.addAnnotation(rowType.fieldType(0), v.locus) // locus/pk
+        rvb.addAnnotation(rowType.fieldType(1), v)
+        rvb.startStruct()
+        rvb.addAnnotation(TString(), rsid)
+        rvb.endStruct()
+        record.getValue(rvb)
+        rvb.endStruct()
+
+        rv.setOffset(rvb.end())
+        rv
+      }
+    }
+
+    new MatrixTable(hc, metadata,
       VSMLocalValue(globalAnnotation = Annotation.empty,
         sampleIds = sampleIds,
         sampleAnnotations = sampleAnnotations),
-      variantRDD)
+      OrderedRVD(matrixType.orderedRVType, rdd2, Some(fastKeys), None))
   }
 
   def apply(hc: HailContext, bedPath: String, bimPath: String, famPath: String, ffConfig: FamFileConfig,
-    nPartitions: Option[Int] = None): VariantDataset = {
+    nPartitions: Option[Int] = None, a2Reference: Boolean = true, gr: GenomeReference = GenomeReference.defaultReference,
+    contigRecoding: Map[String, String] = Map.empty[String, String]): MatrixTable = {
     val (sampleInfo, signature) = parseFam(famPath, ffConfig, hc.hadoopConf)
     val nSamples = sampleInfo.length
     if (nSamples <= 0)
       fatal(".fam file does not contain any samples")
 
-    val variants = parseBim(bimPath, hc.hadoopConf)
+    val variants = parseBim(bimPath, hc.hadoopConf, a2Reference, contigRecoding)
     val nVariants = variants.length
     if (nVariants <= 0)
       fatal(".bim file does not contain any variants")
@@ -188,7 +235,7 @@ object PlinkLoader {
            |  Duplicate IDs: @1""".stripMargin, duplicateIds)
     }
 
-    val vds = parseBed(hc, bedPath, ids, annotations, signature, variants, nPartitions)
+    val vds = parseBed(hc, bedPath, ids, annotations, signature, variants, nPartitions, a2Reference, gr)
     vds
   }
 

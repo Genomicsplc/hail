@@ -4,10 +4,16 @@ import java.io.DataInputStream
 
 import breeze.linalg.DenseMatrix
 import is.hail.SparkSuite
+import is.hail.annotations.Annotation
 import is.hail.check.Prop._
 import is.hail.check.{Gen, Prop}
+import is.hail.expr.Type
+import is.hail.methods.GRM
+import is.hail.io.plink.ExportPlink
+import is.hail.methods.SplitMulti
 import is.hail.utils._
 import is.hail.variant._
+import org.apache.spark.sql.Row
 import org.testng.annotations.Test
 
 import scala.io.Source
@@ -130,12 +136,14 @@ class GRMSuite extends SparkSuite {
 
     Prop.check(forAll(
       VSMSubgen.realistic.copy(
-        vGen = VariantSubgen.plinkCompatible.gen,
-        tGen = VSMSubgen.realistic.tGen(_).filter(_.isCalled))
+        vGen = _ => VariantSubgen.plinkCompatible.gen,
+        tGen = (t: Type, v: Annotation) => VSMSubgen.realistic.tGen(t, v).filter { g =>
+          Genotype.unboxedGT(g) != -1
+        })
         .gen(hc)
+        .map(vds => SplitMulti(vds))
         // plink fails with fewer than 2 samples, no variants
-        .filter(vsm => vsm.nSamples > 1 && vsm.countVariants > 0)
-        .map(_.splitMulti()),
+        .filter(vsm => vsm.nSamples > 1 && vsm.countVariants > 0),
       Gen.oneOf("rel", "gcta-grm", "gcta-grm-bin")) {
       case (vds, format) =>
 
@@ -144,9 +152,9 @@ class GRMSuite extends SparkSuite {
         val nVariants = vds.countVariants().toInt
         assert(nVariants > 0)
 
-        vds.exportPlink(bFile)
+        ExportPlink(vds, bFile)
 
-        val grm = vds.grm()
+        val grm = GRM(vds)
         grm.exportIdFile(relIDFile)
 
         format match {

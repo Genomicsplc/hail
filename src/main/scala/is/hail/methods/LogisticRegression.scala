@@ -1,33 +1,30 @@
 package is.hail.methods
 
 import breeze.linalg._
-import is.hail.annotations.Annotation
+import is.hail.annotations._
 import is.hail.expr._
 import is.hail.stats._
 import is.hail.utils._
 import is.hail.variant._
 import org.apache.spark.rdd.RDD
 
+import scala.reflect.ClassTag
+
 object LogisticRegression {
 
-  def apply(vds: VariantDataset,
+  def apply(vsm: MatrixTable,
     test: String,
     yExpr: String,
+    xExpr: String,
     covExpr: Array[String],
-    root: String,
-    useDosages: Boolean): VariantDataset = {
-
-    require(vds.wasSplit)
-
+    root: String): MatrixTable = {
     val logRegTest = LogisticRegressionTest.tests.getOrElse(test,
       fatal(s"Supported tests are ${ LogisticRegressionTest.tests.keys.mkString(", ") }, got: $test"))
 
-    val (y, cov, completeSamples) = RegressionUtils.getPhenoCovCompleteSamples(vds, yExpr, covExpr)
-    val completeSamplesSet = completeSamples.toSet
-    val sampleMask = vds.sampleIds.map(completeSamplesSet).toArray
-    val completeSampleIndex = (0 until vds.nSamples)
-      .filter(i => completeSamplesSet(vds.sampleIds(i)))
-      .toArray
+    val ec = vsm.matrixType.genotypeEC
+    val xf = RegressionUtils.parseExprAsDouble(xExpr, ec)
+
+    val (y, cov, completeSampleIndex) = RegressionUtils.getPhenoCovCompleteSamples(vsm, yExpr, covExpr)
 
     if (!y.forall(yi => yi == 0d || yi == 1d))
       fatal(s"For logistic regression, phenotype must be Boolean or numeric with all present values equal to 0 or 1")
@@ -51,8 +48,12 @@ object LogisticRegression {
         else
           "Newton iteration failed to converge"))
 
-    val sc = vds.sparkContext
-    val sampleMaskBc = sc.broadcast(sampleMask)
+    val sc = vsm.sparkContext
+
+    val localGlobalAnnotationBc = sc.broadcast(vsm.globalAnnotation)
+    val sampleIdsBc = vsm.sampleIdsBc
+    val sampleAnnotationsBc = vsm.sampleAnnotationsBc
+
     val completeSampleIndexBc = sc.broadcast(completeSampleIndex)
     val yBc = sc.broadcast(y)
     val XBc = sc.broadcast(new DenseMatrix[Double](n, k + 1, cov.toArray ++ Array.ofDim[Double](n)))
@@ -60,30 +61,43 @@ object LogisticRegression {
     val logRegTestBc = sc.broadcast(logRegTest)
 
     val pathVA = Parser.parseAnnotationRoot(root, Annotation.VARIANT_HEAD)
-    val (newVAS, inserter) = vds.insertVA(logRegTest.schema, pathVA)
 
-    vds.copy(rdd = vds.rdd.mapPartitions( { it =>
-      val  missingSamples = new ArrayBuilder[Int]()
+    val (newRVDType, inserter) = vsm.rdd2.typ.insert(logRegTest.schema, "va" :: pathVA)
+    val newVAType = newRVDType.rowType.fieldType(2)
+
+    val localRowType = vsm.rowType
+    val newRVD = vsm.rdd2.mapPartitionsPreservesPartitioning(newRVDType) { it =>
+      val rvb = new RegionValueBuilder()
+      val rv2 = RegionValue()
+
+      val missingSamples = new ArrayBuilder[Int]()
 
       val X = XBc.value.copy
-      it.map { case (v, (va, gs)) =>
-        val x: Vector[Double] = 
-          if (!useDosages)
-            RegressionUtils.hardCalls(gs, n, sampleMaskBc.value)
-          else
-            RegressionUtils.dosages(gs, completeSampleIndexBc.value)
+      it.map { rv =>
+        val ur = new UnsafeRow(localRowType, rv)
+        val v = ur.get(1)
+        val va = ur.get(2)
+        val gs = ur.getAs[IndexedSeq[Annotation]](3)
 
-        X(::, -1) := x
+        RegressionUtils.inputVector(X(::, -1),
+          localGlobalAnnotationBc.value, sampleIdsBc.value, sampleAnnotationsBc.value, (v, (va, gs)),
+          ec, xf,
+          completeSampleIndexBc.value, missingSamples)
 
-        // constant checking to be removed in 0.2
-        val nonConstant = useDosages || !RegressionUtils.constantVector(x)
-        
-        val logregAnnot = if (nonConstant) logRegTestBc.value.test(X, yBc.value, nullFitBc.value).toAnnotation else null
-        val newAnnotation = inserter(va, logregAnnot)
-        assert(newVAS.typeCheck(newAnnotation))
-        (v, (newAnnotation, gs))
+        val logregAnnot = logRegTestBc.value.test(X, yBc.value, nullFitBc.value).toAnnotation
+
+        rvb.set(rv.region)
+        rvb.start(newRVDType.rowType)
+        inserter(rv.region, rv.offset, rvb, () =>
+          rvb.addAnnotation(logRegTest.schema, logregAnnot))
+
+        rv2.set(rv.region, rvb.end())
+        rv2
       }
-    }, preservesPartitioning = true).asOrderedRDD).copy(vaSignature = newVAS)
+    }
+
+    vsm.copy2(vaSignature = newVAType,
+      rdd2 = newRVD)
   }
 }
 

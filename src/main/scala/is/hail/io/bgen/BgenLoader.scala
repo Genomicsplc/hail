@@ -2,8 +2,10 @@ package is.hail.io.bgen
 
 import is.hail.HailContext
 import is.hail.annotations._
-import is.hail.expr.{TString, TStruct, TVariant}
+import is.hail.expr.{MatrixType, TArray, TCall, TFloat64, TString, TStruct, TVariant}
+import is.hail.io.vcf.LoadVCF
 import is.hail.io.{HadoopFSDataBinaryReader, IndexBTree}
+import is.hail.rvd.OrderedRVD
 import is.hail.utils._
 import is.hail.variant._
 import org.apache.hadoop.io.LongWritable
@@ -19,19 +21,15 @@ case class BgenResult[T <: BgenRecord](file: String, nSamples: Int, nVariants: I
 object BgenLoader {
 
   def load(hc: HailContext, files: Array[String], sampleFile: Option[String] = None,
-    tolerance: Double, nPartitions: Option[Int] = None): VariantDataset = {
+    tolerance: Double, nPartitions: Option[Int] = None, gr: GenomeReference = GenomeReference.defaultReference,
+    contigRecoding: Map[String, String] = Map.empty[String, String]): MatrixTable = {
     require(files.nonEmpty)
-    val samples = sampleFile.map(file => BgenLoader.readSampleFile(hc.hadoopConf, file))
+    val sampleIds = sampleFile.map(file => BgenLoader.readSampleFile(hc.hadoopConf, file))
       .getOrElse(BgenLoader.readSamples(hc.hadoopConf, files.head))
 
-    val duplicateIds = samples.duplicates().toArray
-    if (duplicateIds.nonEmpty) {
-      val n = duplicateIds.length
-      warn(s"""found $n duplicate sample ${ plural(n, "ID") }
-               |  Duplicate IDs: @1""".stripMargin, duplicateIds)
-    }
+    LoadVCF.warnDuplicates(sampleIds)
 
-    val nSamples = samples.length
+    val nSamples = sampleIds.length
 
     hc.hadoopConf.setDouble("tolerance", tolerance)
 
@@ -68,26 +66,71 @@ object BgenLoader {
     info(s"Number of samples in BGEN files: $nSamples")
     info(s"Number of variants across all BGEN files: $nVariants")
 
-    val signature = TStruct("rsid" -> TString, "varid" -> TString)
+    val signature = TStruct("rsid" -> TString(), "varid" -> TString())
 
-    val fastKeys = sc.union(results.map(_.rdd.map(_._2.getKey)))
-
-    val rdd = sc.union(results.map(_.rdd.map { case (_, decoder) =>
-      (decoder.getKey, (decoder.getAnnotation, decoder.getValue))
-    })).toOrderedRDD[Locus](fastKeys)
-
-    new VariantSampleMatrix(hc, VSMMetadata(
-      TString,
-      saSignature = TStruct.empty,
-      TVariant,
+    val metadata = VSMMetadata(
+      TString(),
+      saSignature = TStruct.empty(),
+      TVariant(gr),
       vaSignature = signature,
-      globalSignature = TStruct.empty,
-      wasSplit = true,
-      isLinearScale = true),
+      genotypeSignature = TStruct("GT" -> TCall(), "GP" -> TArray(TFloat64())),
+      globalSignature = TStruct.empty())
+
+    val matrixType = MatrixType(metadata)
+    val kType = matrixType.kType
+    val rowType = matrixType.rowType
+
+    val fastKeys = sc.union(results.map(_.rdd.mapPartitions { it =>
+      val region = Region()
+      val rvb = new RegionValueBuilder(region)
+      val rv = RegionValue(region)
+
+      it.map { case (_, record) =>
+        val v = record.getKey
+        val vRecoded = v.copy(contig = contigRecoding.getOrElse(v.contig, v.contig))
+
+        region.clear()
+        rvb.start(kType)
+        rvb.startStruct()
+        rvb.addAnnotation(kType.fieldType(0), vRecoded.locus) // locus/pk
+        rvb.addAnnotation(kType.fieldType(1), vRecoded)
+        rvb.endStruct()
+
+        rv.setOffset(rvb.end())
+        rv
+      }
+    }))
+
+    val rdd2 = sc.union(results.map(_.rdd.mapPartitions { it =>
+      val region = Region()
+      val rvb = new RegionValueBuilder(region)
+      val rv = RegionValue(region)
+
+      it.map { case (_, record) =>
+        val v = record.getKey
+        val va = record.getAnnotation
+
+        val vRecoded = v.copy(contig = contigRecoding.getOrElse(v.contig, v.contig))
+
+        region.clear()
+        rvb.start(rowType)
+        rvb.startStruct()
+        rvb.addAnnotation(rowType.fieldType(0), vRecoded.locus) // locus/pk
+        rvb.addAnnotation(rowType.fieldType(1), vRecoded)
+        rvb.addAnnotation(rowType.fieldType(2), va)
+        record.getValue(rvb) // gs
+        rvb.endStruct()
+
+        rv.setOffset(rvb.end())
+        rv
+      }
+    }))
+
+    new MatrixTable(hc, metadata,
       VSMLocalValue(globalAnnotation = Annotation.empty,
-        sampleIds = samples,
+        sampleIds = sampleIds,
         sampleAnnotations = Array.fill(nSamples)(Annotation.empty)),
-      rdd)
+      OrderedRVD(matrixType.orderedRVType, rdd2, Some(fastKeys), None))
   }
 
   def index(hConf: org.apache.hadoop.conf.Configuration, file: String) {

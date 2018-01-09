@@ -1,8 +1,7 @@
 package is.hail.expr
 
 import is.hail.utils.Interval
-import is.hail.variant.{AltAllele, Call, Genotype, Locus, Variant}
-import scala.collection.mutable
+import is.hail.variant.{AltAllele, Call, GRBase, GRVariable, Genotype, Locus, Variant}
 
 trait HailRep[T] { self =>
   def typ: Type
@@ -11,71 +10,67 @@ trait HailRep[T] { self =>
 trait HailRepFunctions {
 
   implicit object boolHr extends HailRep[Boolean] {
-    def typ = TBoolean
+    def typ = TBoolean()
   }
 
-  implicit object intHr extends HailRep[Int] {
-    def typ = TInt
+  implicit object int32Hr extends HailRep[Int] {
+    def typ = TInt32()
   }
 
-  implicit object longHr extends HailRep[Long] {
-    def typ = TLong
+  implicit object int64Hr extends HailRep[Long] {
+    def typ = TInt64()
   }
 
-  implicit object floatHr extends HailRep[Float] {
-    def typ = TFloat
+  implicit object float32Hr extends HailRep[Float] {
+    def typ = TFloat32()
   }
 
-  implicit object doubleHr extends HailRep[Double] {
-    def typ = TDouble
+  implicit object float64Hr extends HailRep[Double] {
+    def typ = TFloat64()
   }
 
   implicit object boxedboolHr extends HailRep[java.lang.Boolean] {
-    def typ = TBoolean
+    def typ = TBoolean()
   }
 
-  implicit object boxedintHr extends HailRep[java.lang.Integer] {
-    def typ = TInt
+  implicit object boxedInt32Hr extends HailRep[java.lang.Integer] {
+    def typ = TInt32()
   }
 
-  implicit object boxedlongHr extends HailRep[java.lang.Long] {
-    def typ = TLong
+  implicit object boxedInt64Hr extends HailRep[java.lang.Long] {
+    def typ = TInt64()
   }
 
-  implicit object boxedfloatHr extends HailRep[java.lang.Float] {
-    def typ = TFloat
+  implicit object boxedFloat32Hr extends HailRep[java.lang.Float] {
+    def typ = TFloat32()
   }
 
-  implicit object boxeddoubleHr extends HailRep[java.lang.Double] {
-    def typ = TDouble
+  implicit object boxedFloat64Hr extends HailRep[java.lang.Double] {
+    def typ = TFloat64()
   }
 
   implicit object stringHr extends HailRep[String] {
-    def typ = TString
+    def typ = TString()
   }
 
   object callHr extends HailRep[Call] {
-    def typ = TCall
+    def typ = TCall()
   }
 
-  implicit object genotypeHr extends HailRep[Genotype] {
-    def typ = TGenotype
+  implicit class variantHr(gr: GRBase) extends HailRep[Variant] {
+    def typ = TVariant(gr)
   }
 
-  implicit object variantHr extends HailRep[Variant] {
-    def typ = TVariant
-  }
-
-  implicit object locusHr extends HailRep[Locus] {
-    def typ = TLocus
+  implicit class locusHr(gr: GRBase) extends HailRep[Locus] {
+    def typ = TLocus(gr)
   }
 
   implicit object altAlleleHr extends HailRep[AltAllele] {
-    def typ = TAltAllele
+    def typ = TAltAllele()
   }
 
-  implicit object locusIntervalHr extends HailRep[Interval[Locus]] {
-    def typ = TInterval
+  implicit class locusIntervalHr(gr: GRBase) extends HailRep[Interval[Locus]] {
+    def typ = TInterval(gr)
   }
 
   implicit def arrayHr[T](implicit hrt: HailRep[T]) = new HailRep[IndexedSeq[T]] {

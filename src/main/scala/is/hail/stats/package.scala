@@ -2,10 +2,15 @@ package is.hail
 
 import breeze.linalg.Matrix
 import is.hail.annotations.Annotation
+import is.hail.expr.{TArray, TFloat64, TStruct, TVariant}
 import is.hail.utils._
-import is.hail.variant.{Genotype, VSMFileMetadata, Variant, VariantDataset}
-import net.sourceforge.jdistlib.{ChiSquare, Normal, Poisson}
+import is.hail.variant.{GenomeReference, Genotype, VSMFileMetadata, Variant, MatrixTable}
+import net.sourceforge.jdistlib.disttest.{DistributionTest, TestKind}
+import net.sourceforge.jdistlib.{Beta, ChiSquare, Normal, Poisson}
 import org.apache.commons.math3.distribution.HypergeometricDistribution
+import org.apache.spark.sql.Row
+
+import scala.collection.mutable
 
 package object stats {
 
@@ -281,6 +286,8 @@ package object stats {
   // Returns the x for which p = Prob(Z^2 > x) with Z^2 a chi-squared RV with df degrees of freedom
   def inverseChiSquaredTail(df: Double, p: Double): Double = ChiSquare.quantile(p, df, false, false)
 
+  def dbeta(x: Double, a: Double, b: Double): Double = Beta.density(x, a, b, false)
+
   def rpois(lambda: Double): Double = new Poisson(lambda).random()
 
   def rpois(n: Int, lambda: Double): IndexedSeq[Double] = new Poisson(lambda).random(n)
@@ -295,12 +302,31 @@ package object stats {
     result.toInt
   }
 
-  def uninitialized[T]: T = {
-    class A {
-      var x: T = _
+  def binomTest(nSuccess: Int, n: Int, p: Double, alternative: String): Double = {
+    val kind = alternative match {
+      case "two.sided" => TestKind.TWO_SIDED
+      case "less" => TestKind.LOWER
+      case "greater" => TestKind.GREATER
+      case _ => fatal(s"""Invalid alternative "$alternative". Must be "two_sided", "less" or "greater".""")
     }
-    (new A).x
+
+    DistributionTest.binomial_test(nSuccess, n, p, kind)(1)
   }
+
+  def entropy[T](xs: Iterable[T]): Double = {
+    val counts = xs.counter()
+
+    var length = 0
+    var acc = 0.0
+    counts.valuesIterator.foreach { count =>
+      length += count
+      acc += count * math.log(count)
+    }
+
+    (math.log(length) - (acc / length)) / math.log(2)
+  }
+
+  def uninitialized[T]: T = null.asInstanceOf[T]
 
   // genotypes(i,j) is genotype of variant j in sample i encoded as one of {-1, 0, 1, 2}; i and j are 0-based indices
   // sample i is "i" by default
@@ -308,7 +334,7 @@ package object stats {
   def vdsFromGtMatrix(hc: HailContext)(
     gtMat: Matrix[Int],
     samplesIdsOpt: Option[Array[String]] = None,
-    nPartitions: Int = hc.sc.defaultMinPartitions): VariantDataset = {
+    nPartitions: Int = hc.sc.defaultMinPartitions): MatrixTable = {
 
     require(samplesIdsOpt.forall(_.length == gtMat.rows))
     require(samplesIdsOpt.forall(_.areDistinct()))
@@ -321,16 +347,15 @@ package object stats {
           (Annotation.empty,
             (0 until gtMat.rows).map { i =>
               Genotype(gtMat(i, j))
-            }: Iterable[Genotype]
-            )
+            }: Iterable[Annotation]
           )
+        )
       },
-      nPartitions
-    ).toOrderedRDD
+      nPartitions)
 
-    new VariantDataset(hc, VSMFileMetadata(sampleIds, wasSplit = true), rdd)
+    MatrixTable.fromLegacy(hc, VSMFileMetadata(sampleIds), rdd)
   }
-  
+
   // genotypes(i,j) is genotype of variant j in sample i; i and j are 0-based indices
   // sample i is "i" by default
   // variant j is ("1", j + 1, "A", C") since 0 is not a valid position.
@@ -338,7 +363,7 @@ package object stats {
     nAlleles: Int,
     gpMat: Matrix[Array[Double]],
     samplesIdsOpt: Option[Array[String]] = None,
-    nPartitions: Int = hc.sc.defaultMinPartitions): VariantDataset = {
+    nPartitions: Int = hc.sc.defaultMinPartitions): MatrixTable = {
 
     require(samplesIdsOpt.forall(_.length == gpMat.rows))
     require(samplesIdsOpt.forall(_.areDistinct()))
@@ -350,14 +375,15 @@ package object stats {
         (Variant("1", j + 1, "A", "C"),
           (Annotation.empty,
             (0 until gpMat.rows).map { i =>
-              Genotype(nAlleles = nAlleles, dos = gpMat(i,j))
-            }: Iterable[Genotype]
-            )
-          )
+              Row(gpMat(i, j): IndexedSeq[Annotation])
+            }: Iterable[Annotation]))
       },
-      nPartitions
-    ).toOrderedRDD
+      nPartitions)
 
-    new VariantDataset(hc, VSMFileMetadata(sampleIds, wasSplit = true), rdd)
+    MatrixTable.fromLegacy(hc, VSMFileMetadata(sampleIds,
+      vSignature = TVariant(GenomeReference.defaultReference),
+      genotypeSignature = TStruct(
+        "GP" -> TArray(TFloat64()))),
+      rdd)
   }
 }

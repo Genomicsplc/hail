@@ -1,14 +1,15 @@
 package is.hail.io
 
-import breeze.linalg.DenseVector
 import is.hail.SparkSuite
 import is.hail.check.Gen._
 import is.hail.check.Prop._
 import is.hail.check.{Gen, Properties}
-import is.hail.io.bgen.{BGen12ProbabilityArray, Bgen12GenotypeIterator}
-import is.hail.stats.RegressionUtils
+import is.hail.io.bgen.BGen12ProbabilityArray
+import is.hail.io.gen.ExportGen
 import is.hail.utils._
+import is.hail.testUtils._
 import is.hail.variant._
+import org.apache.spark.sql.Row
 import org.testng.annotations.Test
 
 import scala.io.Source
@@ -50,9 +51,9 @@ class LoadBgenSuite extends SparkSuite {
     val gen = "src/test/resources/example.gen"
     val sampleFile = "src/test/resources/example.sample"
     val inputs = Array(
-      ("src/test/resources/example.v11.bgen", 1e-6),
-      ("src/test/resources/example.10bits.bgen", 1d / ((1L << 10) - 1))
-    )
+      ("src/test/resources/example.v11.bgen", 1d / 32768),
+      ("src/test/resources/example.10bits.bgen", 1d / ((1L << 10) - 1)),
+      ("src/test/resources/example.8bits.bgen", 1d / 255))
 
     def testBgen(bgen: String, tolerance: Double = 1e-6): Unit = {
       hadoopConf.delete(bgen + ".idx", recursive = true)
@@ -82,21 +83,18 @@ class LoadBgenSuite extends SparkSuite {
 
       val isSame = genFull.fullOuterJoin(bgenFull)
         .collect()
-        .forall { case ((v, i), (gt1, gt2)) =>
-          (gt1, gt2) match {
-            case (Some(x), Some(y)) =>
-              (x.gp, y.gp) match {
-                case (Some(dos1), Some(dos2)) => dos1.zip(dos2).forall { case (d1, d2) => math.abs(d1 - d2) <= tolerance }
-                case (None, None) => true
-                case _ => false
-              }
-            case _ => false
+        .forall { case ((v, i), (g1, g2)) =>
+          g1 == g2 || {
+            val gp1 = g1.get.asInstanceOf[Row].getAs[IndexedSeq[Double]](1)
+            val gp2 = g2.get.asInstanceOf[Row].getAs[IndexedSeq[Double]](1)
+            gp1 == gp2 || (gp1.zip(gp2)
+              .forall { case (d1, d2) => math.abs(d1 - d2) <= tolerance })
           }
         }
 
       val vdsFile = tmpDir.createTempFile("bgenImportWriteRead", "vds")
       bgenVDS.write(vdsFile)
-      val bgenWriteVDS = hc.readVDS(vdsFile)
+      val bgenWriteVDS = hc.readGDS(vdsFile)
       assert(bgenVDS
         .filterVariantsExpr("va.rsid != \"RSID_100\"")
         .same(bgenWriteVDS.filterVariantsExpr("va.rsid != \"RSID_100\"")
@@ -111,11 +109,11 @@ class LoadBgenSuite extends SparkSuite {
   }
 
   object Spec extends Properties("ImportBGEN") {
-    val compGen = for (vds <- VariantSampleMatrix.gen(hc,
-      VSMSubgen.dosageGenotype.copy(vGen = VariantSubgen.biallelic.gen.map(v => v.copy(contig = "01")),
-        sampleIdGen = Gen.distinctBuildableOf[Array, String](Gen.identifier.filter(_ != "NA"))))
-      .filter(_.countVariants > 0)
-      .map(_.copy(wasSplit = true));
+    val compGen = for (vds <- MatrixTable.gen(hc,
+      VSMSubgen.dosage.copy(
+        vGen = _ => VariantSubgen.biallelic.gen.map(v => v.copy(contig = "01")),
+        sGen = _ => Gen.identifier.filter(_ != "NA")))
+      .filter(_.countVariants > 0);
       nPartitions <- choose(1, 10))
       yield (vds, nPartitions)
 
@@ -126,7 +124,15 @@ class LoadBgenSuite extends SparkSuite {
       forAll(compGen) { case (vds, nPartitions) =>
 
         assert(vds.rdd.forall { case (v, (va, gs)) =>
-          gs.flatMap(_.gp).flatten.forall(d => d >= 0.0 && d <= 1.0)
+          gs.forall { g =>
+            val gp =
+              if (g != null)
+                g.asInstanceOf[Row].getAs[IndexedSeq[Double]](1)
+              else
+                null
+            gp == null || (gp.forall(d => d >= 0.0 && d <= 1.0)
+              && D_==(gp.sum, 1.0))
+          }
         })
 
         val fileRoot = tmpDir.createTempFile("testImportBgen")
@@ -134,7 +140,7 @@ class LoadBgenSuite extends SparkSuite {
         val genFile = fileRoot + ".gen"
         val bgenFile = fileRoot + ".bgen"
 
-        vds.exportGen(fileRoot, 5)
+        ExportGen(vds, fileRoot, 5)
 
         val localRoot = tmpDir.createLocalTempFile("testImportBgen")
         val localGenFile = localRoot + ".gen"
@@ -153,7 +159,6 @@ class LoadBgenSuite extends SparkSuite {
 
         hc.indexBgen(bgenFile)
         val importedVds = hc.importBgen(bgenFile, sampleFile = Some(sampleFile), nPartitions = Some(nPartitions))
-          .cache()
 
         assert(importedVds.nSamples == vds.nSamples)
         assert(importedVds.countVariants() == vds.countVariants())
@@ -168,15 +173,14 @@ class LoadBgenSuite extends SparkSuite {
         val originalFull = vds.expandWithAll().map { case (v, va, s, sa, g) => ((v, s), g) }
 
         originalFull.fullOuterJoin(importedFull).forall { case ((v, i), (g1, g2)) =>
-
-          val r = g1 == g2 ||
-            g1.get.gp.get.zip(g2.get.gp.get)
-              .forall { case (d1, d2) => math.abs(d1 - d2) < 1e-4 }
-
-          if (!r)
-            println(g1, g2)
-
-          r
+          g1 == g2 || {
+            val r1 = g1.get.asInstanceOf[Row]
+            val r2 = g2.get.asInstanceOf[Row]
+            val gp1 = if (r1 != null) r1.getAs[IndexedSeq[Double]](1) else null
+            val gp2 = if (r2 != null) r2.getAs[IndexedSeq[Double]](1) else null
+            gp1 == gp2 || (gp1.zip(gp2)
+              .forall { case (d1, d2) => math.abs(d1 - d2) < 1e-4 })
+          }
         }
       }
   }
@@ -212,41 +216,6 @@ class LoadBgenSuite extends SparkSuite {
     packedInput
   }
 
-  @Test def testDosage() {
-    val sc = hc.sc
-    hc.indexBgen("src/test/resources/example.8bits.bgen")
-    val vds = hc.importBgen("src/test/resources/example.8bits.bgen", nPartitions = Some(8))
-
-    val mask = Array.fill(vds.nSamples)(true)
-    val incompleteSampleIndices = Array(13, 172, 273, 319, 441)
-    for (i <- incompleteSampleIndices)
-      mask(i) = false
-
-    val nKept = vds.nSamples - incompleteSampleIndices.length
-    val maskBc = sc.broadcast(mask)
-
-    val completeSampleIndices = (0 until vds.nSamples)
-      .filter(mask)
-      .toArray
-    assert(completeSampleIndices.length == nKept)
-    val completeSampleIndicesBc = sc.broadcast(completeSampleIndices)
-
-    vds.rdd.foreachPartition { it =>
-      val missingSamples = new ArrayBuilder[Int]()
-      val dosages2 = new DenseVector[Double](nKept)
-      
-      it.foreach { case (v, (va, gs)) =>
-        val dosages1 = new DenseVector[Double](nKept)
-        RegressionUtils.dosages(dosages1, gs, completeSampleIndicesBc.value, missingSamples)
-
-        gs.asInstanceOf[Bgen12GenotypeIterator].dosages(dosages2, completeSampleIndicesBc.value, missingSamples)
-        
-        for (i <- 0 until nKept)
-          simpleAssert(dosages1(i) - dosages2(i) < 1e-3)
-      }
-    }
-  }
-
   object TestProbIterator extends Properties("ImportBGEN") {
     val probIteratorGen = for (
       nBitsPerProb <- Gen.choose(1, 32);
@@ -254,7 +223,7 @@ class LoadBgenSuite extends SparkSuite {
       nGenotypes <- Gen.choose(3, 5);
       nProbabilities = nSamples * (nGenotypes - 1);
       totalProb = ((1L << nBitsPerProb) - 1).toUInt;
-      sampleProbs <- Gen.buildableOfN[Array, Array[UInt]](nSamples, Gen.partition(nGenotypes - 1, totalProb));
+      sampleProbs <- Gen.buildableOfN[Array](nSamples, Gen.partition(nGenotypes - 1, totalProb));
       input = sampleProbs.flatten
     ) yield (nBitsPerProb, nSamples, nGenotypes, input)
 
@@ -296,8 +265,8 @@ class LoadBgenSuite extends SparkSuite {
     hc.indexBgen("src/test/resources/example.v11.bgen")
     val vds = hc.importBgen("src/test/resources/example.v11.bgen", Some("src/test/resources/example.sample"))
 
-    assert(vds.annotateVariantsExpr("va.cr1 = gs.fraction(g => g.isCalled())")
-      .annotateVariantsExpr("va.cr2 = gs.fraction(g => g.isCalled())")
+    assert(vds.annotateVariantsExpr("va.cr1 = gs.fraction(g => isDefined(g.GT))")
+      .annotateVariantsExpr("va.cr2 = gs.fraction(g => isDefined(g.GT))")
       .variantsKT()
       .forall("va.cr1 == va.cr2"))
   }

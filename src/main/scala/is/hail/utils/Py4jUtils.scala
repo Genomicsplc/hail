@@ -1,14 +1,12 @@
 package is.hail.utils
 
-import java.io.{InputStream, OutputStream, OutputStreamWriter}
-import java.util
+import java.io.{InputStream, OutputStream}
 
 import is.hail.HailContext
-import is.hail.utils._
-import is.hail.variant.Locus
+import is.hail.table.Table
+import is.hail.variant.{GenomeReference, Locus, MatrixTable}
 
 import scala.collection.JavaConverters._
-import scala.io.{BufferedSource, Source}
 
 trait Py4jUtils {
   def arrayToArrayList[T](arr: Array[T]): java.util.ArrayList[T] = {
@@ -25,11 +23,16 @@ trait Py4jUtils {
     list
   }
 
-  def parseIntervalList(strs: java.util.ArrayList[String]): IntervalTree[Locus, Unit] =
-    IntervalTree(Locus.parseIntervals(strs.asScala.toArray))
+  def parseIntervalList(strs: java.util.ArrayList[String], gr: GenomeReference): IntervalTree[Locus, Unit] = {
+    implicit val locusOrd = gr.locusOrdering
+    IntervalTree(Locus.parseIntervals(strs.asScala.toArray, gr))
+  }
 
-  def makeIntervalList(intervals: java.util.ArrayList[Interval[Locus]]): IntervalTree[Locus, Unit] =
+
+  def makeIntervalList(intervals: java.util.ArrayList[Interval[Locus]], gr: GenomeReference): IntervalTree[Locus, Unit] = {
+    implicit val locusOrd = gr.locusOrdering
     IntervalTree(intervals.asScala.toArray)
+  }
 
   // we cannot construct an array because we don't have the class tag
   def arrayListToISeq[T](al: java.util.ArrayList[T]): IndexedSeq[T] = al.asScala.toIndexedSeq
@@ -67,6 +70,41 @@ trait Py4jUtils {
   def copyFile(from: String, to: String, hc: HailContext) {
     hc.hadoopConf.copy(from, to)
   }
+
+  def addSocketAppender(hostname: String, port: Int) {
+    val app = new StringSocketAppender(hostname, port, HailContext.logFormat)
+    consoleLog.addAppender(app)
+  }
+
+  def logWarn(msg: String) {
+    warn(msg)
+  }
+
+  def logInfo(msg: String) {
+    info(msg)
+  }
+
+  def logError(msg: String) {
+    error(msg)
+  }
+
+  def joinGlobals(left: Table, right: Table, identifier: String): Table = {
+    left.annotateGlobal(right.globals, right.globalSignature, identifier)
+  }
+
+  def joinGlobals(left: Table, right: MatrixTable, identifier: String): Table = {
+    left.annotateGlobal(right.globalAnnotation, right.globalSignature, identifier)
+  }
+
+  def joinGlobals(left: MatrixTable, right: Table, identifier: String): MatrixTable = {
+    left.annotateGlobal(right.globals, right.globalSignature, "global." + identifier)
+  }
+
+  def joinGlobals(left: MatrixTable, right: MatrixTable, identifier: String): MatrixTable = {
+    left.annotateGlobal(right.globalAnnotation, right.globalSignature, "global." + identifier)
+  }
+
+  def escapePyString(s: String): String = StringEscapeUtils.escapeString(s)
 }
 
 class HadoopPyReader(in: InputStream) {

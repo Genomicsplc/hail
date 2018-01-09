@@ -6,6 +6,7 @@ import scala.io.Source
 import is.hail.SparkSuite
 import is.hail.annotations.Annotation
 import is.hail.expr.TString
+import is.hail.stats.ComputeRRM
 import org.apache.spark.mllib.linalg.Vectors
 import org.apache.spark.mllib.linalg.distributed.{IndexedRow, IndexedRowMatrix}
 import org.testng.annotations.Test
@@ -23,7 +24,7 @@ class KinshipMatrixSuite extends SparkSuite {
 
 
   @Test def testFilterSamplesDimensions() {
-    val km = hc.baldingNicholsModel(1, 15, 15).rrm()
+    val km = ComputeRRM(hc.baldingNicholsModel(1, 15, 15))
     val kmFilt = km.filterSamples { s =>
       val n = s.asInstanceOf[String].toInt
       n < 7 && n > 3
@@ -39,7 +40,7 @@ class KinshipMatrixSuite extends SparkSuite {
     val irdd = sc.parallelize(data)
     val irm = new IndexedRowMatrix(irdd)
     val samples = (0 to 3).map(i => s"S$i")
-    val km = KinshipMatrix(hc, TString, irm, samples.toArray, 10)
+    val km = KinshipMatrix(hc, TString(), irm, samples.toArray, 10)
 
     val kmOneEntry = km.filterSamples(s => s == "S2")
     assert(kmOneEntry.matrix.toBlockMatrix().toLocalMatrix()(0, 0) == 11)
@@ -52,7 +53,7 @@ class KinshipMatrixSuite extends SparkSuite {
     val irdd = sc.parallelize(data)
     val irm = new IndexedRowMatrix(irdd)
     val samples = (0 to 3).map(i => s"S$i")
-    val km = KinshipMatrix(hc, TString, irm, samples.toArray, 10)
+    val km = KinshipMatrix(hc, TString(), irm, samples.toArray, 10)
 
     val out = tmpDir.createTempFile("kinshipMatrixExportTSVTest", ".tsv")
 

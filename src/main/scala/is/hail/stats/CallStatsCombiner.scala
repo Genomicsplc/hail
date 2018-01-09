@@ -3,14 +3,14 @@ package is.hail.stats
 import is.hail.annotations.Annotation
 import is.hail.expr._
 import is.hail.utils._
-import is.hail.variant.{Genotype, Variant}
+import is.hail.variant.{Call, Genotype, Variant}
 
 object CallStats {
-  def schema = TStruct(Array(("AC", TArray(TInt), "Allele count. One element per allele **including reference**. There are two elements for a biallelic variant, or 4 for a variant with three alternate alleles."),
-    ("AF", TArray(TDouble), "Allele frequency. One element per allele including reference. Sums to 1."),
-    ("AN", TInt, "Allele number. This is equal to the sum of AC, or 2 * the total number of called genotypes in the aggregable."),
-    ("GC", TArray(TInt), "Genotype count. One element per possible genotype, including reference genotypes -- 3 for biallelic, 6 for triallelic, 10 for 3 alt alleles, and so on. The sum of this array is the number of called genotypes in the aggregable.")
-  ).zipWithIndex.map { case ((n, t, d), i) => Field(n, t, i, Map(("desc", d))) })
+  def schema = TStruct(
+    "AC" -> TArray(TInt32()),
+    "AF" -> TArray(TFloat64()),
+    "AN" -> TInt32(),
+    "GC" -> TArray(TInt32()))
 }
 
 case class CallStats(alleleCount: IndexedSeq[Int], alleleFrequency: Option[IndexedSeq[Double]], alleleNumber: Int,
@@ -21,13 +21,12 @@ case class CallStats(alleleCount: IndexedSeq[Int], alleleFrequency: Option[Index
   def asAnnotation: Annotation = Annotation(alleleCount, alleleFrequency.orNull, alleleNumber, genotypeCount)
 }
 
-
-class CallStatsCombiner(v: Variant) extends Serializable {
+class CallStatsCombiner(val v: Variant) extends Serializable {
   val alleleCount = new Array[Int](v.nAlleles)
   val genotypeCount = new Array[Int](v.nGenotypes)
 
-  def merge(g: Genotype): CallStatsCombiner = {
-    g.gt.foreach { gt =>
+  def merge(gt: Call): CallStatsCombiner = {
+    if (gt != null) {
       val p = Genotype.gtPair(gt)
       alleleCount(p.j) += 1
       alleleCount(p.k) += 1
@@ -43,6 +42,8 @@ class CallStatsCombiner(v: Variant) extends Serializable {
   }
 
   def result(): CallStats = {
+    assert(alleleCount.sum == 2 * genotypeCount.sum)
+
     val alleleNumber = alleleCount.sum
     val alleleFrequency =
       if (alleleNumber == 0)

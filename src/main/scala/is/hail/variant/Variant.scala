@@ -1,5 +1,6 @@
 package is.hail.variant
 
+import is.hail.annotations.{Region, RegionValue}
 import is.hail.check.{Arbitrary, Gen}
 import is.hail.expr._
 import is.hail.sparkextras.OrderedKey
@@ -15,130 +16,17 @@ import scala.math.Numeric.Implicits._
 import scala.reflect.ClassTag
 
 object Contig {
-  val standardContigs = (1 to 23).map(_.toString) ++ IndexedSeq("X", "Y", "MT")
-  val standardContigIdx = standardContigs.zipWithIndex.toMap
+  def gen(gr: GenomeReference): Gen[(String, Int)] = Gen.oneOfSeq(gr.lengths.toSeq)
 
-  def compare(lhs: String, rhs: String): Int = {
-    (standardContigIdx.get(lhs), standardContigIdx.get(rhs)) match {
-      case (Some(i), Some(j)) => i.compare(j)
-      case (Some(_), None) => -1
-      case (None, Some(_)) => 1
-      case (None, None) => lhs.compare(rhs)
-    }
-  }
-}
-
-case class Contig(name: String, length: Int)
-
-object AltAlleleType extends Enumeration {
-  type AltAlleleType = Value
-  val SNP, MNP, Insertion, Deletion, Complex, Star = Value
-}
-
-object CopyState extends Enumeration {
-  type CopyState = Value
-  val Auto, HemiX, HemiY = Value
-}
-
-object AltAllele {
-  def sparkSchema: StructType = StructType(Array(
-    StructField("ref", StringType, nullable = false),
-    StructField("alt", StringType, nullable = false)))
-
-  val expandedType: TStruct = TStruct("ref" -> TString,
-    "alt" -> TString)
-
-  def fromRow(r: Row): AltAllele =
-    AltAllele(r.getString(0), r.getString(1))
-
-  def gen(ref: String): Gen[AltAllele] =
-    for (alt <- Gen.frequency((10, genDNAString),
-      (1, Gen.const("*"))) if alt != ref)
-      yield AltAllele(ref, alt)
-
-  def gen: Gen[AltAllele] =
-    for (ref <- genDNAString;
-      alt <- genDNAString if alt != ref)
-      yield AltAllele(ref, alt)
-
-  implicit def altAlleleOrder: Ordering[AltAllele] = new Ordering[AltAllele] {
-    def compare(x: AltAllele, y: AltAllele): Int = x.compare(y)
-  }
-}
-
-case class AltAllele(ref: String,
-  alt: String) {
-  require(ref != alt, "ref was equal to alt")
-  require(!ref.isEmpty, "ref was an empty string")
-  require(!alt.isEmpty, "alt was an empty string")
-
-  import AltAlleleType._
-
-  def altAlleleType: AltAlleleType = {
-    if (isSNP)
-      SNP
-    else if (isInsertion)
-      Insertion
-    else if (isDeletion)
-      Deletion
-    else if (isStar)
-      Star
-    else if (ref.length == alt.length)
-      MNP
-    else
-      Complex
+  def gen(gr: GenomeReference, contig: String): Gen[(String, Int)] = {
+    assert(gr.isValidContig(contig), s"Contig $contig not found in genome reference.")
+    Gen.const((contig, gr.contigLength(contig)))
   }
 
-  def isStar: Boolean = alt == "*"
-
-  def isSNP: Boolean = !isStar && ( (ref.length == 1 && alt.length == 1) ||
-    (ref.length == alt.length && nMismatch == 1) )
-
-  def isMNP: Boolean = ref.length > 1 &&
-    ref.length == alt.length &&
-    nMismatch > 1
-
-  def isInsertion: Boolean = ref.length < alt.length && ref(0) == alt(0) && alt.endsWith(ref.substring(1))
-
-  def isDeletion: Boolean = alt.length < ref.length && ref(0) == alt(0) && ref.endsWith(alt.substring(1))
-
-  def isIndel: Boolean = isInsertion || isDeletion
-
-  def isComplex: Boolean = ref.length != alt.length && !isInsertion && !isDeletion
-
-  def isTransition: Boolean = isSNP && {
-    val (refChar, altChar) = strippedSNP
-    (refChar == 'A' && altChar == 'G') || (refChar == 'G' && altChar == 'A') ||
-      (refChar == 'C' && altChar == 'T') || (refChar == 'T' && altChar == 'C')
-  }
-
-  def isTransversion: Boolean = isSNP && !isTransition
-
-  def nMismatch: Int = {
-    require(ref.length == alt.length, s"invalid nMismatch call on ref `${ ref }' and alt `${ alt }'")
-    (ref, alt).zipped.map((a, b) => if (a == b) 0 else 1).sum
-  }
-
-  def strippedSNP: (Char, Char) = {
-    require(isSNP, "called strippedSNP on non-SNP")
-    (ref, alt).zipped.dropWhile { case (a, b) => a == b }.head
-  }
-
-  def toRow: Row = Row(ref, alt)
-
-  def toJSON: JValue = JObject(
-    ("ref", JString(ref)),
-    ("alt", JString(alt)))
-
-  override def toString: String = s"$ref/$alt"
-
-  def compare(that: AltAllele): Int = {
-    val c = ref.compare(that.ref)
-    if (c != 0)
-      return c
-
-    alt.compare(that.alt)
-  }
+  def gen(nameGen: Gen[String] = Gen.identifier, lengthGen: Gen[Int] = Gen.choose(1000000, 500000000)): Gen[(String, Int)] = for {
+    name <- nameGen
+    length <- lengthGen
+  } yield (name, length)
 }
 
 object Variant {
@@ -161,10 +49,33 @@ object Variant {
   def parse(str: String): Variant = {
     val colonSplit = str.split(":")
     if (colonSplit.length != 4)
-      fatal(s"expected 4 colon-delimited fields, but found ${ colonSplit.length }")
+      fatal(s"invalid variant, expected 4 colon-delimited fields, found ${ colonSplit.length }: $str")
     val Array(contig, start, ref, alts) = colonSplit
     Variant(contig, start.toInt, ref, alts.split(","))
   }
+
+  def fromRegionValue(r: Region, offset: Long): Variant = {
+    val t = TVariant.representation()
+    val altsType = t.fieldType(3).asInstanceOf[TArray]
+
+    val contig = TString.loadString(r, t.loadField(r, offset, 0))
+    val pos = r.loadInt(t.loadField(r, offset, 1))
+    val ref = TString.loadString(r, t.loadField(r, offset, 2))
+
+    val altsOffset = t.loadField(r, offset, 3)
+    val nAlts = altsType.loadLength(r, altsOffset)
+    val altArray = new Array[AltAllele](nAlts)
+    var i = 0
+    while (i < nAlts) {
+      val o = altsType.loadElement(r, altsOffset, nAlts, i)
+      altArray(i) = AltAllele.fromRegionValue(r, o)
+      i += 1
+    }
+    Variant(contig, pos, ref, altArray)
+  }
+
+  def fromRegionValue(rv: RegionValue): Variant =
+    fromRegionValue(rv.region, rv.offset)
 
   def nGenotypes(nAlleles: Int): Int = {
     require(nAlleles > 0, s"called nGenotypes with invalid number of alternates: $nAlleles")
@@ -183,12 +94,6 @@ object Variant {
       StructField("altAlleles", ArrayType(AltAllele.sparkSchema, containsNull = false),
         nullable = false)))
 
-  def expandedType: TStruct =
-    TStruct("contig" -> TString,
-      "start" -> TInt,
-      "ref" -> TString,
-      "altAlleles" -> TArray(AltAllele.expandedType))
-
   def fromRow(r: Row) =
     Variant(r.getAs[String](0),
       r.getAs[Int](1),
@@ -197,17 +102,17 @@ object Variant {
         .map(s => AltAllele.fromRow(s))
         .toArray)
 
-  implicit val orderedKey: OrderedKey[Locus, Variant] =
+  def orderedKey(gr: GenomeReference): OrderedKey[Locus, Variant] =
     new OrderedKey[Locus, Variant] {
       def project(key: Variant): Locus = key.locus
 
-      def kOrd: Ordering[Variant] = implicitly[Ordering[Variant]]
+      val kOrd: Ordering[Variant] = gr.variantOrdering
 
-      def pkOrd: Ordering[Locus] = implicitly[Ordering[Locus]]
+      val pkOrd: Ordering[Locus] = gr.locusOrdering
 
-      def kct: ClassTag[Variant] = implicitly[ClassTag[Variant]]
+      val kct: ClassTag[Variant] = implicitly[ClassTag[Variant]]
 
-      def pkct: ClassTag[Locus] = implicitly[ClassTag[Locus]]
+      val pkct: ClassTag[Locus] = implicitly[ClassTag[Locus]]
     }
 
   def variantUnitRdd(sc: SparkContext, input: String): RDD[(Variant, Unit)] =
@@ -224,56 +129,53 @@ object Variant {
             fields(3).split(",").map(alt => AltAllele(ref, alt))), ())
         }.value
       }
-
-  implicit def variantOrder: Ordering[Variant] = new Ordering[Variant] {
-    def compare(x: Variant, y: Variant): Int = x.compare(y)
-  }
 }
 
 object VariantSubgen {
   val random = VariantSubgen(
-    contigGen = Gen.identifier,
-    startGen = Gen.posInt,
+    contigGen = Contig.gen(),
     nAllelesGen = Gen.frequency((5, Gen.const(2)), (1, Gen.choose(2, 10))),
     refGen = genDNAString,
     altGen = Gen.frequency((10, genDNAString),
       (1, Gen.const("*"))))
 
-  val plinkCompatible = random.copy(
-    contigGen = Gen.choose(1, 22).map(_.toString)
-  )
+  val plinkCompatible = random.copy(contigGen = Contig.gen(nameGen = Gen.choose(1, 22).map(_.toString)))
 
   val biallelic = random.copy(nAllelesGen = Gen.const(2))
+
+  def fromGenomeRef(gr: GenomeReference): VariantSubgen =
+    random.copy(contigGen = Contig.gen(gr))
 }
 
 case class VariantSubgen(
-  contigGen: Gen[String],
-  startGen: Gen[Int],
+  contigGen: Gen[(String, Int)],
   nAllelesGen: Gen[Int],
   refGen: Gen[String],
   altGen: Gen[String]) {
 
   def gen: Gen[Variant] =
-    for (contig <- contigGen;
-      start <- startGen;
+    for ((contig, length) <- contigGen;
+      start <- Gen.choose(1, length);
       nAlleles <- nAllelesGen;
       ref <- refGen;
-      altAlleles <- Gen.distinctBuildableOfN[Array, String](
-        nAlleles,
+      altAlleles <- Gen.distinctBuildableOfN[Array](
+        nAlleles - 1,
         altGen)
         .filter(!_.contains(ref))) yield
-      Variant(contig, start, ref, altAlleles.tail.map(alt => AltAllele(ref, alt)))
+      Variant(contig, start, ref, altAlleles.map(alt => AltAllele(ref, alt)))
 }
 
-case class Variant(contig: String,
-  start: Int,
-  ref: String,
-  altAlleles: IndexedSeq[AltAllele]) {
+trait IVariant { self =>
+  def contig(): String
 
-  /* The position is 1-based. Telomeres are indicated by using positions 0 or N+1, where N is the length of the
-       corresponding chromosome or contig. See the VCF spec, v4.2, section 1.4.1. */
-  require(start >= 0, s"invalid variant: negative position: `${ this.toString }'")
-  require(!ref.isEmpty, s"invalid variant: empty contig: `${ this.toString }'")
+  def start(): Int
+
+  def ref(): String
+
+  def altAlleles(): IndexedSeq[AltAllele]
+
+  def copy(contig: String = contig, start: Int = start, ref: String = ref, altAlleles: IndexedSeq[AltAllele] = altAlleles): Variant =
+    Variant(contig, start, ref, altAlleles)
 
   def nAltAlleles: Int = altAlleles.length
 
@@ -282,7 +184,7 @@ case class Variant(contig: String,
   // FIXME altAllele, alt to be deprecated
   def altAllele: AltAllele = {
     require(isBiallelic, "called altAllele on a non-biallelic variant")
-    altAlleles(0)
+    altAlleles()(0)
   }
 
   def alt: String = altAllele.alt
@@ -292,85 +194,48 @@ case class Variant(contig: String,
   def allele(i: Int): String = if (i == 0)
     ref
   else
-    altAlleles(i - 1).alt
+    altAlleles()(i - 1).alt
 
   def nGenotypes = Variant.nGenotypes(nAlleles)
 
   def locus: Locus = Locus(contig, start)
 
-  def isAutosomalOrPseudoAutosomal: Boolean =
-    isAutosomal || inXPar || inYPar
+  def isAutosomalOrPseudoAutosomal(gr: GRBase): Boolean = isAutosomal(gr) || inXPar(gr) || inYPar(gr)
 
-  def isAutosomal = !(inX || inY || isMitochondrial)
+  def isAutosomal(gr: GRBase): Boolean = !(inX(gr) || inY(gr) || isMitochondrial(gr))
 
-  def isMitochondrial = {
-    val c = contig.toUpperCase
-    c == "MT" || c == "M" || c == "26"
-  }
+  def isMitochondrial(gr: GRBase): Boolean = gr.isMitochondrial(contig)
 
-  // PAR regions of sex chromosomes: https://en.wikipedia.org/wiki/Pseudoautosomal_region
-  // Boundaries for build GRCh37: http://www.ncbi.nlm.nih.gov/projects/genome/assembly/grc/human/
-  def inXParPos: Boolean = (60001 <= start && start <= 2699520) || (154931044 <= start && start <= 155260560)
+  def inXPar(gr: GRBase): Boolean = gr.inXPar(locus)
 
-  def inYParPos: Boolean = (10001 <= start && start <= 2649520) || (59034050 <= start && start <= 59363566)
+  def inYPar(gr: GRBase): Boolean = gr.inYPar(locus)
 
-  // FIXME: will replace with contig == "X" etc once bgen/plink support is merged and conversion is handled by import
-  def inXPar: Boolean = inX && inXParPos
+  def inXNonPar(gr: GRBase): Boolean = inX(gr) && !inXPar(gr)
 
-  def inYPar: Boolean = inY && inYParPos
+  def inYNonPar(gr: GRBase): Boolean = inY(gr) && !inYPar(gr)
 
-  def inXNonPar: Boolean = inX && !inXParPos
+  private def inX(gr: GRBase): Boolean = gr.inX(contig)
 
-  def inYNonPar: Boolean = inY && !inYParPos
-
-  private def inX: Boolean = contig.toUpperCase == "X" || contig == "23" || contig == "25"
-
-  private def inY: Boolean = contig.toUpperCase == "Y" || contig == "24"
+  private def inY(gr: GRBase): Boolean = gr.inY(contig)
 
   import CopyState._
 
-  def copyState(sex: Sex.Sex): CopyState =
+  def copyState(sex: Sex.Sex, gr: GenomeReference): CopyState =
     if (sex == Sex.Male)
-      if (inXNonPar)
+      if (inXNonPar(gr))
         HemiX
-      else if (inYNonPar)
+      else if (inYNonPar(gr))
         HemiY
       else
         Auto
     else
       Auto
 
-  def compare(that: Variant): Int = {
-    var c = Contig.compare(contig, that.contig)
-    if (c != 0)
-      return c
+  def compare(that: Variant, gr: GenomeReference): Int = gr.compare(this, that)
 
-    c = start.compare(that.start)
-    if (c != 0)
-      return c
-
-    c = ref.compare(that.ref)
-    if (c != 0)
-      return c
-
-    c = nAltAlleles.compare(that.nAltAlleles)
-    if (c != 0)
-      return c
-
-    var i = 0
-    while (i < altAlleles.length) {
-      c = altAlleles(i).alt.compare(that.altAlleles(i).alt)
-      if (c != 0)
-        return c
-      i += 1
-    }
-
-    0
-  }
-
-  def minRep: Variant = {
+  def minRep: IVariant = {
     if (ref.length == 1)
-      this
+      self
     else if (altAlleles.forall(a => a.isStar))
       Variant(contig, start, ref.substring(0, 1), altAlleles.map(_.alt).toArray)
     else {
@@ -381,20 +246,20 @@ case class Variant(contig: String,
       var ne = 0
 
       while (ne < min_length - 1
-        && alts.forall(x => ref(ref.length - ne - 1) == x(x.length - ne - 1))
+        && alts.forall(x => ref()(ref.length - ne - 1) == x(x.length - ne - 1))
       ) {
         ne += 1
       }
 
       var ns = 0
       while (ns < min_length - ne - 1
-        && alts.forall(x => ref(ns) == x(ns))
+        && alts.forall(x => ref()(ns) == x(ns))
       ) {
         ns += 1
       }
 
       if (ne + ns == 0)
-        this
+        self
       else {
         assert(ns < ref.length - ne && alts.forall(x => ns < x.length - ne))
         Variant(contig, start + ns, ref.substring(ns, ref.length - ne),
@@ -420,4 +285,18 @@ case class Variant(contig: String,
     ("ref", JString(ref)),
     ("altAlleles", JArray(altAlleles.map(_.toJSON).toList))
   )
+}
+
+case class Variant(contig: String,
+  start: Int,
+  ref: String,
+  override val altAlleles: IndexedSeq[AltAllele]) extends IVariant {
+  require(altAlleles.forall(_.ref == ref))
+
+  /* The position is 1-based. Telomeres are indicated by using positions 0 or N+1, where N is the length of the
+       corresponding chromosome or contig. See the VCF spec, v4.2, section 1.4.1. */
+  require(start >= 0, s"invalid variant: negative position: `${ this.toString }'")
+  require(!ref.isEmpty, s"invalid variant: empty contig: `${ this.toString }'")
+
+  override def minRep: Variant = super.minRep.asInstanceOf[Variant]
 }

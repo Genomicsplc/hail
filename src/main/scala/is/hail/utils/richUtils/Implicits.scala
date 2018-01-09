@@ -1,7 +1,12 @@
 package is.hail.utils.richUtils
 
+import java.io.InputStream
+
 import breeze.linalg.DenseMatrix
-import is.hail.utils.{ArrayBuilder, HailIterator, JSONWriter, MultiArray2, Truncatable}
+import is.hail.annotations.{Region, RegionValue}
+import is.hail.asm4s.Code
+import is.hail.io.RichRDDRegionValue
+import is.hail.utils.{ArrayBuilder, HailIterator, JSONWriter, MultiArray2, Truncatable, WithContext}
 import is.hail.variant.Variant
 import org.apache.hadoop
 import org.apache.spark.SparkContext
@@ -38,7 +43,7 @@ trait Implicits {
   implicit def toRichIndexedRow(r: IndexedRow): RichIndexedRow = new RichIndexedRow(r)
 
   implicit def toRichInt(i: Int): RichInt = new RichInt(i)
-  
+
   implicit def toRichIndexedRowMatrix(irm: IndexedRowMatrix): RichIndexedRowMatrix = new RichIndexedRowMatrix(irm)
 
   implicit def toRichIntPairTraversableOnce[V](t: TraversableOnce[(Int, V)]): RichIntPairTraversableOnce[V] =
@@ -47,6 +52,8 @@ trait Implicits {
   implicit def toRichIterable[T](i: Iterable[T]): RichIterable[T] = new RichIterable(i)
 
   implicit def toRichIterable[T](a: Array[T]): RichIterable[T] = new RichIterable(a)
+
+  implicit def toRichContextIterator[T](it: Iterator[WithContext[T]]): RichContextIterator[T] = new RichContextIterator[T](it)
 
   implicit def toRichIterator[T](it: Iterator[T]): RichIterator[T] = new RichIterator[T](it)
 
@@ -73,13 +80,12 @@ trait Implicits {
   implicit def toRichPairRDD[K, V](r: RDD[(K, V)])(implicit kct: ClassTag[K],
     vct: ClassTag[V]): RichPairRDD[K, V] = new RichPairRDD(r)
 
-  implicit def toRichVariantPairRDD[V](r: RDD[(Variant, V)])(implicit vct: ClassTag[V]): RichVariantPairRDD[V] =
-    RichVariantPairRDD(r)
-
   implicit def toRichPairTraversableOnce[K, V](t: TraversableOnce[(K, V)]): RichPairTraversableOnce[K, V] =
     new RichPairTraversableOnce[K, V](t)
 
   implicit def toRichRDD[T](r: RDD[T])(implicit tct: ClassTag[T]): RichRDD[T] = new RichRDD(r)
+
+  implicit def toRichRDDRegionValue(r: RDD[RegionValue]): RichRDDRegionValue = new RichRDDRegionValue(r)
 
   implicit def toRichRDDByteArray(r: RDD[Array[Byte]]): RichRDDByteArray = new RichRDDByteArray(r)
 
@@ -88,8 +94,6 @@ trait Implicits {
   implicit def toRichRow(r: Row): RichRow = new RichRow(r)
 
   implicit def toRichSC(sc: SparkContext): RichSparkContext = new RichSparkContext(sc)
-
-  implicit def toRichSQLContext(sqlContext: SQLContext): RichSQLContext = new RichSQLContext(sqlContext)
 
   implicit def toRichSortedPairIterator[K, V](it: Iterator[(K, V)]): RichPairIterator[K, V] = new RichPairIterator(it)
 
@@ -113,4 +117,10 @@ trait Implicits {
     override def next(): Double = it.next().toDouble
     override def hasNext: Boolean = it.hasNext
   }
+
+  implicit def toRichInputStream(in: InputStream): RichInputStream = new RichInputStream(in)
+
+  implicit def toRichCodeRegion(r: Code[Region]): RichCodeRegion = new RichCodeRegion(r)
+
+  implicit def toRichPartialKleisliOptionFunction[A, B](x: PartialFunction[A, Option[B]]): RichPartialKleisliOptionFunction[A, B] = new RichPartialKleisliOptionFunction(x)
 }

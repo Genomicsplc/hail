@@ -4,11 +4,12 @@ import is.hail.SparkSuite
 import is.hail.TestUtils._
 import is.hail.annotations._
 import is.hail.check.Prop
-import is.hail.expr.{TDouble, TInt, TString, TStruct}
+import is.hail.expr.{TFloat64, TInt32, TString, TStruct}
 import is.hail.io.annotators.{BedAnnotator, IntervalList}
 import is.hail.io.plink.{FamFileConfig, PlinkLoader}
-import is.hail.keytable.KeyTable
+import is.hail.table.Table
 import is.hail.utils._
+import is.hail.testUtils._
 import is.hail.variant._
 import org.apache.spark.sql.Row
 import org.testng.annotations.Test
@@ -37,18 +38,18 @@ class AnnotateSuite extends SparkSuite {
     }
 
     val anno1 = vds.annotateSamplesTable(
-      hc.importTable("src/test/resources/sampleAnnotations.tsv", types = Map("qPhen" -> TInt)).keyBy("Sample"),
+      hc.importTable("src/test/resources/sampleAnnotations.tsv", types = Map("qPhen" -> TInt32())).keyBy("Sample"),
       root = "sa.`my phenotype`")
 
     val q1 = anno1.querySA("sa.`my phenotype`.Status")._2
     val q2 = anno1.querySA("sa.`my phenotype`.qPhen")._2
 
-    assert(anno1.sampleIdsAndAnnotations
+    assert(anno1.stringSampleIdsAndAnnotations
       .forall { case (id, sa) =>
-          fileMap.get(id).forall { case (status, qphen) =>
-            status.liftedZip(Option(q1(sa))).exists { case (v1, v2) => v1 == v2 } &&
-              (qphen.isEmpty && Option(q2(sa)).isEmpty || qphen.liftedZip(Option(q2(sa))).exists { case (v1, v2) => v1 == v2 })
-          }
+        fileMap.get(id).forall { case (status, qphen) =>
+          status.liftedZip(Option(q1(sa))).exists { case (v1, v2) => v1 == v2 } &&
+            (qphen.isEmpty && Option(q2(sa)).isEmpty || qphen.liftedZip(Option(q2(sa))).exists { case (v1, v2) => v1 == v2 })
+        }
       })
   }
 
@@ -60,7 +61,7 @@ class AnnotateSuite extends SparkSuite {
     List("0", "0.0", ".0", "-01", "1e5", "1e10", "1.1e10", ".1E-10").foreach(assertNumeric)
     List("", "a", "1.", ".1.", "1e", "e", "E0", "1e1.", "1e.1", "1e1.1").foreach(assertNonNumeric)
 
-    def qMap(query: String, vds: VariantDataset): Map[Annotation, Option[Any]] = {
+    def qMap(query: String, vds: MatrixTable): Map[Annotation, Option[Any]] = {
       val q = vds.querySA(query)._2
       vds.sampleIds
         .zip(vds.sampleAnnotations)
@@ -71,7 +72,7 @@ class AnnotateSuite extends SparkSuite {
     var vds = hc.importVCF("src/test/resources/importFam.vcf")
 
     vds = vds.annotateSamplesTable(
-      KeyTable.importFam(hc, "src/test/resources/importFamCaseControl.fam"), expr = "sa.fam=table")
+      Table.importFam(hc, "src/test/resources/importFamCaseControl.fam"), expr = "sa.fam=table")
     val m = qMap("sa.fam", vds)
 
     assert(m("A").contains(Annotation("Newton", "C", "D", false, false)))
@@ -82,11 +83,11 @@ class AnnotateSuite extends SparkSuite {
     assert(m("F").isEmpty)
 
     interceptFatal("non-numeric") {
-      KeyTable.importFam(hc, "src/test/resources/importFamCaseControlNumericException.fam")
+      Table.importFam(hc, "src/test/resources/importFamCaseControlNumericException.fam")
     }
 
     vds = vds.annotateSamplesTable(
-      KeyTable.importFam(hc, "src/test/resources/importFamQPheno.fam", isQuantitative = true), expr = "sa.fam=table")
+      Table.importFam(hc, "src/test/resources/importFamQPheno.fam", isQuantitative = true), expr = "sa.fam=table")
     val m1 = qMap("sa.fam", vds)
 
     assert(m1("A").contains(Annotation("Newton", "C", "D", false, 1.0)))
@@ -98,7 +99,7 @@ class AnnotateSuite extends SparkSuite {
 
 
     vds = vds.annotateSamplesTable(
-      KeyTable.importFam(hc, "src/test/resources/importFamQPheno.space.m9.fam", isQuantitative = true,
+      Table.importFam(hc, "src/test/resources/importFamQPheno.space.m9.fam", isQuantitative = true,
         delimiter = "\\\\s+", missingValue = "-9"), expr = "sa.ped = table")
 
     val m2 = qMap("sa.ped", vds)
@@ -113,8 +114,7 @@ class AnnotateSuite extends SparkSuite {
   }
 
   @Test def testVariantTSVAnnotator() {
-    val vds = hc.importVCF("src/test/resources/sample.vcf")
-      .splitMulti()
+    val vds = SplitMulti(hc.importVCF("src/test/resources/sample.vcf"))
 
     val fileMap = hadoopConf.readFile("src/test/resources/variantAnnotations.tsv") { reader =>
       Source.fromInputStream(reader)
@@ -131,15 +131,15 @@ class AnnotateSuite extends SparkSuite {
         .toMap
     }
     val kt1 = hc.importTable("src/test/resources/variantAnnotations.tsv",
-      types = Map("Rand1" -> TDouble, "Rand2" -> TDouble))
-      .annotate("Variant = Variant(Chromosome, Position.toInt(), Ref, Alt)")
+      types = Map("Rand1" -> TFloat64(), "Rand2" -> TFloat64()))
+      .annotate("Variant = Variant(Chromosome, Position.toInt32(), Ref, Alt)")
       .keyBy("Variant")
 
     val anno1 = vds.annotateVariantsTable(kt1,
       expr = "va.stuff = select(table, Rand1, Rand2, Gene)")
 
     val q1 = anno1.queryVA("va.stuff")._2
-    anno1.rdd
+    anno1.typedRDD[Locus, Variant]
       .collect()
       .foreach {
         case (v, (va, gs)) =>
@@ -148,15 +148,15 @@ class AnnotateSuite extends SparkSuite {
       }
 
     val kt2 = hc.importTable("src/test/resources/variantAnnotations.alternateformat.tsv",
-      types = Map("Rand1" -> TDouble, "Rand2" -> TDouble))
+      types = Map("Rand1" -> TFloat64(), "Rand2" -> TFloat64()))
       .annotate("v = Variant(`Chromosome:Position:Ref:Alt`)")
       .keyBy("v")
     val anno1alternate = vds.annotateVariantsTable(kt2,
       expr = "va.stuff = select(table, Rand1, Rand2, Gene)")
 
     val kt3 = hc.importTable("src/test/resources/variantAnnotations.split.*.tsv",
-      types = Map("Rand1" -> TDouble, "Rand2" -> TDouble))
-      .annotate("v = Variant(Chromosome, Position.toInt(), Ref, Alt)")
+      types = Map("Rand1" -> TFloat64(), "Rand2" -> TFloat64()))
+      .annotate("v = Variant(Chromosome, Position.toInt32(), Ref, Alt)")
       .keyBy("v")
     val anno1glob = vds.annotateVariantsTable(kt3,
       expr = "va.stuff = select(table, Rand1, Rand2, Gene)")
@@ -166,14 +166,17 @@ class AnnotateSuite extends SparkSuite {
   }
 
   @Test def testVCFAnnotator() {
-    val vds = hc.importVCF("src/test/resources/sample.vcf")
-      .splitMulti()
+    val vds = SplitMulti(hc.importVCF("src/test/resources/sample.vcf"))
 
-    val anno1 = vds.annotateVariantsVDS(hc.importVCF("src/test/resources/sampleInfoOnly.vcf").splitMulti(),
+    val anno1 = vds.annotateVariantsVDS(
+      // sampleInfoOnly.vcf has empty genotype schema
+      SplitMulti(hc.importVCF("src/test/resources/sampleInfoOnly.vcf"),
+        "va.aIndex = aIndex, va.wasSplit = wasSplit", ""),
       root = Some("va.other"))
 
-    val otherMap = hc.importVCF("src/test/resources/sampleInfoOnly.vcf")
-      .splitMulti()
+    val otherMap = SplitMulti(hc.importVCF("src/test/resources/sampleInfoOnly.vcf"),
+      // sampleInfoOnly.vcf has empty genotype schema
+      "va.aIndex = aIndex, va.wasSplit = wasSplit", "")
       .variantsAndAnnotations
       .collect()
       .toMap
@@ -192,9 +195,8 @@ class AnnotateSuite extends SparkSuite {
   }
 
   @Test def testBedIntervalAnnotator() {
-    val vds = hc.importVCF("src/test/resources/sample.vcf")
+    val vds = SplitMulti(hc.importVCF("src/test/resources/sample.vcf"))
       .cache()
-      .splitMulti()
 
     val bed1r = vds.annotateVariantsTable(BedAnnotator(hc, "src/test/resources/example1.bed"), root = "va.test")
     val bed2r = vds.annotateVariantsTable(BedAnnotator(hc, "src/test/resources/example2.bed"), root = "va.test")
@@ -206,35 +208,35 @@ class AnnotateSuite extends SparkSuite {
 
     bed1r.variantsAndAnnotations
       .collect()
-      .foreach {
-        case (v, va) =>
-          assert(v.start <= 14000000 ||
-            v.start >= 17000000 ||
-            q1(va) == false)
+      .foreach { case (v1, va) =>
+        val v = v1.asInstanceOf[Variant]
+        assert(v.start <= 14000000 ||
+          v.start >= 17000000 ||
+          q1(va) == false)
       }
 
     bed2r.variantsAndAnnotations
       .collect()
-      .foreach {
-        case (v, va) =>
-          if (v.start <= 14000000)
-            assert(q2(va) == "gene1")
-          else if (v.start >= 17000000)
-            assert(q2(va) == "gene2")
-          else
-            assert(q2(va) == null)
+      .foreach { case (v1, va) =>
+        val v = v1.asInstanceOf[Variant]
+        if (v.start <= 14000000)
+          assert(q2(va) == "gene1")
+        else if (v.start >= 17000000)
+          assert(q2(va) == "gene2")
+        else
+          assert(q2(va) == null)
       }
 
     bed3r.variantsAndAnnotations
       .collect()
-      .foreach {
-        case (v, va) =>
-          if (v.start <= 14000000)
-            assert(q3(va) == "gene1", v)
-          else if (v.start >= 17000000)
-            assert(q3(va) == "gene2", v)
-          else
-            assert(q3(va) == null, v)
+      .foreach { case (v1, va) =>
+        val v = v1.asInstanceOf[Variant]
+        if (v.start <= 14000000)
+          assert(q3(va) == "gene1", v)
+        else if (v.start >= 17000000)
+          assert(q3(va) == "gene2", v)
+        else
+          assert(q3(va) == null, v)
       }
 
     assert(bed3r.same(bed2r))
@@ -254,15 +256,16 @@ class AnnotateSuite extends SparkSuite {
   @Test def testImportAnnotations() {
     var vds = hc.importVCF("src/test/resources/sample.vcf")
 
-    val sSample = vds.splitMulti()
+    val sSample = SplitMulti(vds)
 
     // tsv
     val importTSVFile = tmpDir.createTempFile("variantAnnotationsTSV", ".vds")
-    vds = VariantDataset.fromKeyTable(hc.importTable("src/test/resources/variantAnnotations.tsv",
-      impute = true, types = Map("Chromosome" -> TString))
+    vds = MatrixTable.fromKeyTable(hc.importTable("src/test/resources/variantAnnotations.tsv",
+      impute = true, types = Map("Chromosome" -> TString()))
       .annotate("v = Variant(Chromosome, Position, Ref, Alt)")
       .keyBy("v"))
-      .splitMulti()
+    vds = SplitMulti(vds)
+    vds = vds
       .annotateVariantsExpr(
         """va = {Chromosome: va.Chromosome,
           |Position: va.Position,
@@ -274,14 +277,14 @@ class AnnotateSuite extends SparkSuite {
     vds.write(importTSVFile)
 
     val kt = hc.importTable("src/test/resources/variantAnnotations.tsv",
-      impute = true, types = Map("Chromosome" -> TString))
+      impute = true, types = Map("Chromosome" -> TString()))
       .annotate("v = Variant(Chromosome, Position, Ref, Alt)")
       .keyBy("v")
 
     vds = sSample
       .annotateVariantsTable(kt, expr = "va.stuff = table")
 
-    var t = sSample.annotateVariantsVDS(hc.read(importTSVFile), root = Some("va.stuff"))
+    var t = sSample.annotateVariantsVDS(hc.readVDS(importTSVFile), root = Some("va.stuff"))
 
     assert(vds.same(t))
 
@@ -290,32 +293,31 @@ class AnnotateSuite extends SparkSuite {
     // FIXME better way to array-ify
 
     val kt2 = hc.importTable("src/test/resources/importAnnot.json",
-      types = Map("f0" -> TStruct("Rand1" -> TDouble, "Rand2" -> TDouble,
-        "Gene" -> TString, "contig" -> TString, "start" -> TInt, "ref" -> TString, "alt" -> TString)),
+      types = Map("f0" -> TStruct("Rand1" -> TFloat64(), "Rand2" -> TFloat64(),
+        "Gene" -> TString(), "contig" -> TString(), "start" -> TInt32(), "ref" -> TString(), "alt" -> TString())),
       noHeader = true)
       .annotate("""v = Variant(f0.contig, f0.start, f0.ref, f0.alt.split("/"))""")
       .keyBy("v")
 
-    vds = VariantDataset.fromKeyTable(kt2)
+    vds = MatrixTable.fromKeyTable(kt2)
       .annotateVariantsExpr("va = va.f0")
-      .filterMulti()
+      .filterVariantsExpr("v.isBiallelic")
     vds.write(importJSONFile)
 
     vds = sSample.annotateVariantsTable(kt2, root = "va.third")
 
-    t = sSample.annotateVariantsVDS(hc.read(importJSONFile), root = Some("va.third"))
+    t = sSample.annotateVariantsVDS(hc.readVDS(importJSONFile), root = Some("va.third"))
 
     assert(vds.same(t))
   }
 
   @Test def testAnnotateSamples() {
-    val vds = hc.importVCF("src/test/resources/sample.vcf")
-      .splitMulti()
+    val vds = SplitMulti(hc.importVCF("src/test/resources/sample.vcf"))
 
     val annoMap = vds.sampleIds.map(id => (id, 5))
       .toMap
     val vds2 = vds.filterSamples({ case (s, sa) => scala.util.Random.nextFloat > 0.5 })
-      .annotateSamples(annoMap, TInt, "sa.test")
+      .annotateSamples(annoMap, TInt32(), "sa.test")
 
     val q = vds2.querySA("sa.test")._2
 
@@ -437,8 +439,8 @@ class AnnotateSuite extends SparkSuite {
 
   @Test def testAnnotationsVDSReadWrite() {
     val outPath = tmpDir.createTempFile("annotationOut", ".vds")
-    val p = Prop.forAll(VariantSampleMatrix.gen(hc, VSMSubgen.realistic)
-      .filter(vds => vds.countVariants > 0)) { vds: VariantDataset =>
+    val p = Prop.forAll(MatrixTable.gen(hc, VSMSubgen.realistic)
+      .filter(vds => vds.countVariants > 0)) { vds: MatrixTable =>
 
       vds.annotateVariantsVDS(vds, code = Some("va = vds")).same(vds)
     }
@@ -447,19 +449,18 @@ class AnnotateSuite extends SparkSuite {
   }
 
   @Test def testPositions() {
-    val vds = hc.importVCF("src/test/resources/sample2.vcf")
-      .splitMulti()
+    val vds = SplitMulti(hc.importVCF("src/test/resources/sample2.vcf"))
 
     val kt = hc.importTable("src/test/resources/sample2_va_positions.tsv",
-      types = Map("Rand1" -> TDouble, "Rand2" -> TDouble))
-      .annotate("loc = Locus(Chromosome, Position.toInt())")
+      types = Map("Rand1" -> TFloat64(), "Rand2" -> TFloat64()))
+      .annotate("loc = Locus(Chromosome, Position.toInt32())")
       .keyBy("loc")
 
     val byPosition = vds.annotateVariantsTable(kt, expr = "va.stuff = select(table, Rand1, Rand2)")
 
     val kt2 = hc.importTable("src/test/resources/sample2_va_nomulti.tsv",
-      types = Map("Rand1" -> TDouble, "Rand2" -> TDouble))
-      .annotate("v = Variant(Chromosome, Position.toInt(), Ref, Alt)")
+      types = Map("Rand1" -> TFloat64(), "Rand2" -> TFloat64()))
+      .annotate("v = Variant(Chromosome, Position.toInt32(), Ref, Alt)")
       .keyBy("v")
     val byVariant = vds.annotateVariantsTable(kt2,
       expr = "va.stuff = select(table, Rand1, Rand2)")
@@ -477,7 +478,7 @@ class AnnotateSuite extends SparkSuite {
 
     val vds = hc.importVCF("src/test/resources/sample2.vcf").cache()
 
-    val vkt = vds.variantsKT().select(Array("v"), Array("v"))
+    val vkt = vds.variantsKT().select("v")
       .filter("v.start != 16054957", keep = true)
       .repartition(6)
       .cache()
@@ -486,7 +487,8 @@ class AnnotateSuite extends SparkSuite {
     val var1 = vds.annotateVariantsTable(vkt, root = "va")
     var1.variantsAndAnnotations
       .collect()
-      .foreach { case (v, va) =>
+      .foreach { case (v1, va) =>
+        val v = v1.asInstanceOf[Variant]
         if (v.start == 16054957)
           assert(va == false)
         else
@@ -497,7 +499,8 @@ class AnnotateSuite extends SparkSuite {
     val var2 = vds.annotateVariantsTable(vkt.union(vkt), root = "va", product = true)
     var2.variantsAndAnnotations
       .collect()
-      .foreach { case (v, va) =>
+      .foreach { case (v1, va) =>
+        val v = v1.asInstanceOf[Variant]
         if (v.start == 16054957)
           assert(va == 0)
         else
@@ -509,7 +512,8 @@ class AnnotateSuite extends SparkSuite {
     val var3 = vds.annotateVariantsTable(vkt2, root = "va")
     var3.variantsAndAnnotations
       .collect()
-      .foreach { case (v, va) =>
+      .foreach { case (v1, va) =>
+        val v = v1.asInstanceOf[Variant]
         if (v.start == 16054957)
           assert(va == null)
         else
@@ -520,7 +524,8 @@ class AnnotateSuite extends SparkSuite {
     val var4 = vds.annotateVariantsTable(vkt2.union(vkt2), root = "va", product = true)
     var4.variantsAndAnnotations
       .collect()
-      .foreach { case (v, va) =>
+      .foreach { case (v1, va) =>
+        val v = v1.asInstanceOf[Variant]
         if (v.start == 16054957)
           assert(va == IndexedSeq())
         else
@@ -532,7 +537,8 @@ class AnnotateSuite extends SparkSuite {
     val var5 = vds.annotateVariantsTable(vkt3, root = "va")
     var5.variantsAndAnnotations
       .collect()
-      .foreach { case (v, va) =>
+      .foreach { case (v1, va) =>
+        val v = v1.asInstanceOf[Variant]
         if (v.start == 16054957)
           assert(va == null)
         else
@@ -543,15 +549,15 @@ class AnnotateSuite extends SparkSuite {
     val var6 = vds.annotateVariantsTable(vkt3.union(vkt3), root = "va", product = true)
     var6.variantsAndAnnotations
       .collect()
-      .foreach { case (v, va) =>
+      .foreach { case (v1, va) =>
+        val v = v1.asInstanceOf[Variant]
         if (v.start == 16054957)
           assert(va == IndexedSeq())
         else
           assert(va == IndexedSeq(Row(5, 10), Row(5, 10)))
       }
 
-    val lkt = vkt.annotate("l = v.locus").select(Array("l"), Array("l"))
-      .select(Array("l"), Array("l"))
+    val lkt = vkt.annotate("l = v.locus").select("l").keyBy("l")
 
     // locus key, 0 elements in value, product false
     val loc1 = vds.annotateVariantsTable(lkt, root = "va")
@@ -574,7 +580,7 @@ class AnnotateSuite extends SparkSuite {
     val loc6 = vds.annotateVariantsTable(lkt3.union(lkt3), root = "va", product = true)
 
     val ikt = vkt.annotate("i = Interval(Locus(v.contig, v.start), Locus(v.contig, v.start + 1))")
-      .select(Array("i"), Array("i"))
+      .select("i").keyBy("i")
 
     // interval key, 0 elements in value, product false
     val int1 = vds.annotateVariantsTable(ikt, root = "va")
@@ -645,7 +651,7 @@ class AnnotateSuite extends SparkSuite {
     assert(gen6.dropSamples().same(drop6))
 
 
-    val skt = vds.samplesKT().select(Array("s"), Array("s"))
+    val skt = vds.samplesKT().select(Array("s"))
       .filter("s != \"HG00112\"", keep = true)
       .repartition(6)
       .cache()

@@ -8,7 +8,7 @@ import is.hail.check.Properties
 import is.hail.expr._
 import is.hail.utils.StringEscapeUtils._
 import is.hail.utils.{Interval, _}
-import is.hail.variant.{Call, Genotype, Locus, Variant}
+import is.hail.variant.{Call, GenomeReference, Genotype, Locus, Variant}
 import is.hail.{SparkSuite, TestUtils}
 import org.apache.spark.sql.Row
 import org.json4s._
@@ -29,6 +29,10 @@ class ExprSuite extends SparkSuite {
     assert(run[Boolean]("true").contains(true))
     assert(run[Boolean]("false").contains(false))
     assert(run[String](""""foo"""").contains("foo"))
+
+    assert(run[String]("'foo'").contains("foo"))
+    assert(run[String]("'\"foo'").contains("\"foo"))
+    assert(run[String]("'\\'foo'").contains("'foo"))
 
     assert(run[String]("""if (true) "foo" else "bar"""").contains("foo"))
     assert(run[String]("""if (false) "foo" else "bar"""").contains("bar"))
@@ -63,45 +67,45 @@ class ExprSuite extends SparkSuite {
 
     assert(run[Int](""""abc".length""").contains(3))
     assert(run[IndexedSeq[String]](""""a,b,c".split(",")""").contains(Array("a", "b", "c"): IndexedSeq[String]))
-    assert(run[Int]("(3.0).toInt()").contains(3))
-    assert(run[Double]("(3).toDouble()").contains(3.0))
+    assert(run[Int]("(3.0).toInt32()").contains(3))
+    assert(run[Double]("(3).toFloat64()").contains(3.0))
   }
 
   @Test def exprTest() {
-    val symTab = Map("i" -> (0, TInt),
-      "j" -> (1, TInt),
-      "d" -> (2, TDouble),
-      "d2" -> (3, TDouble),
-      "s" -> (4, TString),
-      "s2" -> (5, TString),
-      "a" -> (6, TArray(TInt)),
-      "m" -> (7, TInt),
-      "as" -> (8, TArray(TStruct(("a", TInt),
-        ("b", TString)))),
-      "gs" -> (9, TStruct(("noCall", TGenotype),
-        ("homRef", TGenotype),
-        ("het", TGenotype),
-        ("homVar", TGenotype),
-        ("hetNonRef35", TGenotype))),
-      "t" -> (10, TBoolean),
-      "f" -> (11, TBoolean),
-      "mb" -> (12, TBoolean),
-      "is" -> (13, TString),
-      "iset" -> (14, TSet(TInt)),
-      "genedict" -> (15, TDict(TString, TInt)),
+    val symTab = Map("i" -> (0, TInt32()),
+      "j" -> (1, TInt32()),
+      "d" -> (2, TFloat64()),
+      "d2" -> (3, TFloat64()),
+      "s" -> (4, TString()),
+      "s2" -> (5, TString()),
+      "a" -> (6, TArray(TInt32())),
+      "m" -> (7, TInt32()),
+      "as" -> (8, TArray(TStruct(("a", TInt32()),
+        ("b", TString())))),
+      "gs" -> (9, TStruct(("noCall", TCall()),
+        ("homRef", TCall()),
+        ("het", TCall()),
+        ("homVar", TCall()),
+        ("hetNonRef35", TCall()))),
+      "t" -> (10, TBoolean()),
+      "f" -> (11, TBoolean()),
+      "mb" -> (12, TBoolean()),
+      "is" -> (13, TString()),
+      "iset" -> (14, TSet(TInt32())),
+      "genedict" -> (15, TDict(TString(), TInt32())),
       "structArray" -> (16, TArray(TStruct(
-        ("f1", TInt),
-        ("f2", TString),
-        ("f3", TInt)))),
-      "a2" -> (17, TArray(TString)),
-      "nullarr" -> (18, TArray(TInt)),
-      "nullset" -> (19, TSet(TInt)),
-      "emptyarr" -> (20, TArray(TInt)),
-      "emptyset" -> (21, TSet(TInt)),
-      "calls" -> (22, TStruct(("noCall", TCall),
-        ("homRef", TCall),
-        ("het", TCall),
-        ("homVar", TCall)
+        ("f1", TInt32()),
+        ("f2", TString()),
+        ("f3", TInt32())))),
+      "a2" -> (17, TArray(TString())),
+      "nullarr" -> (18, TArray(TInt32())),
+      "nullset" -> (19, TSet(TInt32())),
+      "emptyarr" -> (20, TArray(TInt32())),
+      "emptyset" -> (21, TSet(TInt32())),
+      "calls" -> (22, TStruct(("noCall", TCall()),
+        ("homRef", TCall()),
+        ("het", TCall()),
+        ("homVar", TCall())
       )))
 
     val ec = EvalContext(symTab)
@@ -115,13 +119,8 @@ class ExprSuite extends SparkSuite {
     a(5) = "this is a String, there are many like it, but this one is mine"
     a(6) = IndexedSeq(1, 2, null, 6, 3, 3, -1, 8)
     a(7) = null // m
-    a(8) = Array[Any](Annotation(23, "foo"), Annotation.empty): IndexedSeq[Any]
-    a(9) = Annotation(
-      Genotype(),
-      Genotype(gt = Some(0)),
-      Genotype(gt = Some(1)),
-      Genotype(gt = Some(2)),
-      Genotype(gt = Some(Genotype.gtIndex(3, 5))))
+    a(8) = Array[Any](Annotation(23, "foo"), null): IndexedSeq[Any]
+    a(9) = Annotation(null, 0, 1, 2, Genotype.gtIndex(3, 5))
     a(10) = true
     a(11) = false
     a(12) = null // mb
@@ -159,10 +158,20 @@ class ExprSuite extends SparkSuite {
       (t, Option(f()).map(_.asInstanceOf[T]))
     }
 
-    assert(eval[Int]("is.toInt()").contains(-37))
+    assert(D_==(eval[Double]("gamma(5)").get, 24))
+    assert(D_==(eval[Double]("gamma(0.5)").get, 1.7724538509055159)) // python: math.gamma(0.5)
+
+    // uniroot (default) tolerance is ~1.22e-4
+    assert(D_==(eval[Double]("uniroot(x => x*x + 3*x - 4, 0, 2)").get, 1, tolerance = 1e-4))
+    assert(D_==(eval[Double]("uniroot(x => x*x + 3*x - 4, -5, -1)").get, -4, tolerance = 1e-4))
+
+    assert(eval[Int]("is.toInt32()").contains(-37))
 
     assert(eval[Boolean]("!true").contains(false))
     assert(eval[Boolean]("!isMissing(i)").contains(true))
+
+    assert(eval[Boolean]("-j").contains(7))
+    assert(eval[Boolean]("+j").contains(-7))
 
     assert(eval[Boolean]("gs.het.isHomRef()").contains(false))
     assert(eval[Boolean]("!gs.het.isHomRef()").contains(true))
@@ -221,7 +230,7 @@ class ExprSuite extends SparkSuite {
     assert(eval[Double]("1.0 / -0.0").contains(Double.NegativeInfinity))
     assert(eval[Double]("0/0 * 1/0").forall(_.isNaN))
     assert(eval[Double]("0.0/0.0 * 1.0/0.0").forall(_.isNaN))
-    for { x <- Array("-1.0/0.0", "-1.0", "0.0", "1.0", "1.0/0.0") } {
+    for {x <- Array("-1.0/0.0", "-1.0", "0.0", "1.0", "1.0/0.0")} {
       assert(eval[Boolean](s"0.0/0.0 < $x").contains(false))
       assert(eval[Boolean](s"0.0/0.0 <= $x").contains(false))
       assert(eval[Boolean](s"0.0/0.0 > $x").contains(false))
@@ -332,12 +341,15 @@ class ExprSuite extends SparkSuite {
     assert(eval[Set[_]]("""iset.flatMap(x => [x].toSet())""").contains(Set(0, 1, 2)))
     assert(eval[Set[_]]("""iset.flatMap(x => [x, x + 1].toSet())""").contains(Set(0, 1, 2, 3)))
     assert(eval[Set[_]]("""iset.add(3)""").contains(Set(0, 1, 2, 3)))
+    assert(eval[Set[_]]("""iset.remove(3)""").contains(Set(0, 1, 2)))
+    assert(eval[Set[_]]("""iset.remove(0)""").contains(Set(1, 2)))
+    assert(eval[Set[_]]("""iset.add(3).remove(0)""").contains(Set(1, 2, 3)))
     assert(eval[Set[_]]("""iset.union([2,3,4].toSet)""").contains(Set(0, 1, 2, 3, 4)))
     assert(eval[Set[_]]("""iset.intersection([2,3,4].toSet)""").contains(Set(2)))
     assert(eval[Set[_]]("""iset.difference([2,3,4].toSet)""").contains(Set(0, 1)))
-    assert(eval[Boolean]("""iset.issubset([2,3,4].toSet)""").contains(false))
-    assert(eval[Boolean]("""iset.issubset([0,1].toSet)""").contains(false))
-    assert(eval[Boolean]("""iset.issubset([0,1,2,3,4].toSet)""").contains(true))
+    assert(eval[Boolean]("""iset.isSubset([2,3,4].toSet)""").contains(false))
+    assert(eval[Boolean]("""iset.isSubset([0,1].toSet)""").contains(false))
+    assert(eval[Boolean]("""iset.isSubset([0,1,2,3,4].toSet)""").contains(true))
 
 
     assert(eval[Set[_]]("""nullset.flatMap(x => [x].toSet())""").isEmpty)
@@ -442,6 +454,7 @@ class ExprSuite extends SparkSuite {
     assert(eval[Double]("""a.mean()""").contains(22 / 7.0))
     assert(eval[Int]("""a.sum()""").contains(IndexedSeq(1, 2, 6, 3, 3, -1, 8).sum))
     assert(eval[String]("""str(i)""").contains("5"))
+    assert(eval[String]("""let l = Locus("1", 1000) in json(l)""").contains("""{"contig":"1","position":1000}"""))
     assert(eval[String](""" "" + 5 + "5" """) == eval[String](""" "5" + 5 """))
     assert(eval[Int]("""iset.min()""").contains(0))
     assert(eval[Int]("""iset.max()""").contains(2))
@@ -480,11 +493,11 @@ class ExprSuite extends SparkSuite {
 
     val (t, r) = evalWithType[Annotation](""" {field1: 1, field2: 2 } """)
     assert(r.contains(Annotation(1, 2)))
-    assert(t == TStruct(("field1", TInt), ("field2", TInt)))
+    assert(t == TStruct(("field1", TInt32()), ("field2", TInt32())))
 
     val (t2, r2) = evalWithType[Annotation](""" {field1: 1, asdasd: "Hello" } """)
     assert(r2.contains(Annotation(1, "Hello")))
-    assert(t2 == TStruct(("field1", TInt), ("asdasd", TString)))
+    assert(t2 == TStruct(("field1", TInt32()), ("asdasd", TString())))
 
     assert(eval[IndexedSeq[_]](""" [0,1,2,3][0:2] """).contains(IndexedSeq(0, 1)))
     assert(eval[IndexedSeq[_]](""" [0,1,2,3][2:100] """).contains(IndexedSeq(2, 3)))
@@ -551,13 +564,13 @@ class ExprSuite extends SparkSuite {
         "B" -> Annotation(5, 6),
         "C" -> Annotation(10, 10))
     ))
-    assert(dictType == TDict(TString, TStruct(("f1", TInt), ("f3", TInt))))
+    assert(dictType == TDict(TString(), TStruct(("f1", TInt32()), ("f3", TInt32()))))
 
     val (dictt, dictr2) = evalWithType(""" index(structArray, f2)""")
     assert(dictr2.contains(Map("A" -> Annotation(1, 2),
       "B" -> Annotation(5, 6),
       "C" -> Annotation(10, 10))))
-    assert(dictt == TDict(TString, TStruct("f1" -> TInt, "f3" -> TInt)))
+    assert(dictt == TDict(TString(), TStruct("f1" -> TInt32(), "f3" -> TInt32())))
 
     assert(eval[Int](""" index(structArray, f2)["B"].f3 """).contains(6))
     assert(eval[Map[_, _]](""" index(structArray, f2).mapValues(x => x.f1) """).contains(Map(
@@ -606,6 +619,16 @@ class ExprSuite extends SparkSuite {
         |else if (false) false
         |else true
       """.stripMargin).contains(true))
+
+    val ifConditionNotBooleanMessage = "condition must have type Boolean"
+    TestUtils.interceptFatal(ifConditionNotBooleanMessage)(
+      eval[Int]("""if (1) 1 else 0"""))
+    TestUtils.interceptFatal(ifConditionNotBooleanMessage)(
+      eval[Int]("""if ("a") 1 else 0"""))
+    TestUtils.interceptFatal(ifConditionNotBooleanMessage)(
+      eval[Int]("""if (0.1) 1 else 0"""))
+    TestUtils.interceptFatal(ifConditionNotBooleanMessage)(
+      eval[Int]("""if ([1]) 1 else 0"""))
 
     assert(eval[Annotation]("""merge({a: 1, b: 2}, {c: false, d: true}) """).contains(Annotation(1, 2, false, true)))
     assert(eval[Annotation]("""merge(NA: Struct{a: Int, b: Int}, {c: false, d: true}) """).contains(Annotation(null, null, false, true)))
@@ -663,6 +686,7 @@ class ExprSuite extends SparkSuite {
     assert(eval[Locus]("""Locus("1:1")""").contains(Locus("1", 1)))
     assert(eval[Boolean]("""let l = Locus("1", 1) in Locus(str(l)) == l""").contains(true))
 
+    implicit val locusOrd = GenomeReference.GRCh37.locusOrdering
     assert(eval[Interval[Locus]]("""Interval(Locus("1", 1), Locus("2", 2))""").contains(Interval(Locus("1", 1), Locus("2", 2))))
     assert(eval[Locus](""" Interval(Locus("1", 1), Locus("2", 2)).start """).contains(Locus("1", 1)))
     assert(eval[Locus](""" Interval(Locus("1", 1), Locus("2", 2)).end """).contains(Locus("2", 2)))
@@ -676,7 +700,7 @@ class ExprSuite extends SparkSuite {
     TestUtils.interceptFatal("""invalid escape character.*backtick identifier.*\\i""")(eval[String](""" let `bad\identifier` = 0 in 0 """))
     TestUtils.interceptFatal("""unterminated backtick identifier""")(eval[String](""" let `bad\identifier = 0 in 0 """))
 
-    assert(D_==(eval[Double]("log(56.toLong())").get, math.log(56)))
+    assert(D_==(eval[Double]("log(56.toInt64())").get, math.log(56)))
     assert(D_==(eval[Double]("exp(5.6)").get, math.exp(5.6)))
     assert(D_==(eval[Double]("log10(5.6)").get, math.log10(5.6)))
     assert(D_==(eval[Double]("log10(5.6)").get, eval[Double]("log(5.6, 10)").get))
@@ -686,7 +710,7 @@ class ExprSuite extends SparkSuite {
 
     assert(eval[IndexedSeq[Int]]("""[1,2,3] + [2,3,4] """).contains(IndexedSeq(3, 5, 7)))
     assert(eval[IndexedSeq[Int]]("""[1,2,3] - [2,3,4] """).contains(IndexedSeq(-1, -1, -1)))
-    assert(eval[IndexedSeq[Double]]("""[1,2,3] / [2,3,4] """).contains(IndexedSeq(.5, 2.toDouble / 3.toDouble, .75)))
+    assert(eval[IndexedSeq[Double]]("""[1,2,3] / [2,3,4] """).contains(IndexedSeq(.5, 2.toDouble / 3, .75)))
     assert(eval[IndexedSeq[Double]]("""1 / [2,3,4] """).contains(IndexedSeq(1.0 / 2.0, 1.0 / 3.0, 1.0 / 4.0)))
     assert(eval[IndexedSeq[Double]]("""[2,3,4] / 2""").contains(IndexedSeq(1.0, 1.5, 2.0)))
     assert(eval[IndexedSeq[Double]]("""[2,3,4] * 2.0""").contains(IndexedSeq(4.0, 6.0, 8.0)))
@@ -717,23 +741,29 @@ class ExprSuite extends SparkSuite {
       eval[Double](""" log(Variant("22", 123, "A", "T")) """)
     }
 
-    assert(eval[Int]("[0, 0.toLong()][0].toInt()").contains(0))
-    assert(eval[Int]("[0, 0.toFloat()][0].toInt()").contains(0))
-    assert(eval[Int]("[0, 0.toDouble()][0].toInt()").contains(0))
+    assert(eval[Int]("[0, 0.toInt64()][0].toInt32()").contains(0))
+    assert(eval[Int]("[0, 0.toFloat32()][0].toInt32()").contains(0))
+    assert(eval[Int]("[0, 0.toFloat64()][0].toInt32()").contains(0))
     assert(eval[Boolean]("[NA:Int] == [0]").contains(false))
-    assert(eval[Boolean]("[NA:Long] == [0.toLong()]").contains(false))
-    assert(eval[Boolean]("[NA:Float] == [0.toFloat()]").contains(false))
-    assert(eval[Boolean]("[NA:Double] == [0.toDouble()]").contains(false))
+    assert(eval[Boolean]("[NA:Int64] == [0.toInt64()]").contains(false))
+    assert(eval[Boolean]("[NA:Float32] == [0.toFloat32()]").contains(false))
+    assert(eval[Boolean]("[NA:Float] == [0.toFloat64()]").contains(false))
 
     assert(eval[IndexedSeq[Int]]("range(5)").contains(IndexedSeq(0, 1, 2, 3, 4)))
     assert(eval[IndexedSeq[Int]]("range(1)").contains(IndexedSeq(0)))
     assert(eval[IndexedSeq[Int]]("range(10, 14)").contains(IndexedSeq(10, 11, 12, 13)))
     assert(eval[IndexedSeq[Int]]("range(-2, 2)").contains(IndexedSeq(-2, -1, 0, 1)))
 
+    assert(eval[IndexedSeq[Int]]("range(0)").contains(IndexedSeq()))
+    assert(eval[IndexedSeq[Int]]("range(-2)").contains(IndexedSeq()))
+
+    assert(eval[IndexedSeq[Int]]("range(10, 10)").contains(IndexedSeq()))
+    assert(eval[IndexedSeq[Int]]("range(10, 0)").contains(IndexedSeq()))
+
     assert(eval[Boolean]("pcoin(2.0)").contains(true))
     assert(eval[Boolean]("pcoin(-1.0)").contains(false))
-    assert(eval[Boolean]("pcoin(2.0.toFloat())").contains(true))
-    assert(eval[Boolean]("pcoin(-1.0.toFloat())").contains(false))
+    assert(eval[Boolean]("pcoin(2.0.toFloat32())").contains(true))
+    assert(eval[Boolean]("pcoin(-1.0.toFloat32())").contains(false))
 
     assert(eval[Boolean]("runif(2.0, 3.0) > -1.0").contains(true))
     assert(eval[Boolean]("runif(2.0, 3.0) < 3.0").contains(true))
@@ -759,7 +789,7 @@ class ExprSuite extends SparkSuite {
     assert(D_==(eval[Int]("qpois(log(0.4), 5, true, true)").get, 4))
     assert(D_==(eval[Int]("qpois(0.4, 5, false, false)").get, 5))
 
-    assert(eval[Any]("if (true) NA: Double else 0.0").isEmpty)
+    assert(eval[Any]("if (true) NA: Float64 else 0.0").isEmpty)
 
     assert(eval[Int]("gtIndex(3, 5)").contains(18))
     assert(eval[Int]("gtj(18)").contains(3))
@@ -782,55 +812,41 @@ class ExprSuite extends SparkSuite {
     // assert(eval[Long](Long.MinValue.toString+"L").contains(Long.MinValue))
     // assert(eval[Long](Long.MinValue.toString+"l").contains(Long.MinValue))
 
-    assert(eval[Genotype]("let c = calls.noCall in c.toGenotype()").contains(Genotype(-1)))
-    assert(eval[Genotype]("let c = calls.homRef in c.toGenotype()").contains(Genotype(0)))
-    assert(eval[Genotype]("let c = calls.het in c.toGenotype()").contains(Genotype(1)))
-    assert(eval[Genotype]("let c = calls.homVar in c.toGenotype()").contains(Genotype(2)))
-
-    assert(eval[Boolean]("calls.noCall.isNotCalled()").contains(true))
+    assert(eval[Boolean]("isMissing(calls.noCall)").contains(true))
     assert(eval[Boolean]("calls.noCall.isHomRef()").contains(false))
     assert(eval[Boolean]("calls.noCall.isHet()").contains(false))
     assert(eval[Boolean]("calls.noCall.isHomVar()").contains(false))
-    assert(eval[Boolean]("calls.noCall.isCalledNonRef()").contains(false))
+    assert(eval[Boolean]("calls.noCall.isNonRef()").contains(false))
     assert(eval[Boolean]("calls.noCall.isHetNonRef()").contains(false))
     assert(eval[Boolean]("calls.noCall.isHetRef()").contains(false))
     assert(eval[Boolean]("isMissing(calls.noCall.nNonRefAlleles())").contains(true))
     assert(eval[Boolean]("isMissing(calls.noCall.gtj())").contains(true))
     assert(eval[Boolean]("isMissing(calls.noCall.gt())").contains(true))
     assert(eval[Boolean]("""let c = calls.noCall and v = Variant("1", 1, "A", "T") in isMissing(c.oneHotAlleles(v))""").contains(true))
-    assert(eval[Boolean]("""let c = calls.noCall and v = Variant("1", 1, "A", "T") and g = c.toGenotype() in isMissing(g.oneHotAlleles(v))""").contains(true))
     assert(eval[Boolean]("""let c = calls.noCall and v = Variant("1", 1, "A", "T") in isMissing(c.oneHotGenotype(v))""").contains(true))
-    assert(eval[Boolean]("""let c = calls.noCall and v = Variant("1", 1, "A", "T") and g = c.toGenotype() in isMissing(g.oneHotGenotype(v))""").contains(true))
 
-    assert(eval[Boolean]("calls.homRef.isCalled()").contains(true))
+    assert(eval[Boolean]("isDefined(calls.homRef)").contains(true))
     assert(eval[Boolean]("calls.homRef.isHomRef()").contains(true))
     assert(eval[Boolean]("calls.homRef.isHet()").contains(false))
     assert(eval[Boolean]("calls.homRef.isHomVar()").contains(false))
     assert(eval[Boolean]("calls.homRef.nNonRefAlleles() == 0").contains(true))
     assert(eval[IndexedSeq[Int]]("""let c = calls.homRef and v = Variant("1", 1, "A", "T") in c.oneHotAlleles(v)""").contains(IndexedSeq(2, 0)))
-    assert(eval[IndexedSeq[Int]]("""let c = calls.homRef and v = Variant("1", 1, "A", "T") and g = c.toGenotype() in g.oneHotAlleles(v)""").contains(IndexedSeq(2, 0)))
-    assert(eval[IndexedSeq[Int]]("""let c = calls.homRef and v = Variant("1", 1, "A", "T") in c.oneHotGenotype(v)""").contains(IndexedSeq(1, 0, 0)))
-    assert(eval[IndexedSeq[Int]]("""let c = calls.homRef and v = Variant("1", 1, "A", "T") and g = c.toGenotype() in g.oneHotGenotype(v)""").contains(IndexedSeq(1, 0, 0)))
 
-    assert(eval[Boolean]("calls.het.isCalled()").contains(true))
+    assert(eval[Boolean]("isDefined(calls.het)").contains(true))
     assert(eval[Boolean]("calls.het.isHomRef()").contains(false))
     assert(eval[Boolean]("calls.het.isHet()").contains(true))
     assert(eval[Boolean]("calls.het.isHomVar()").contains(false))
     assert(eval[Boolean]("calls.het.nNonRefAlleles() == 1").contains(true))
     assert(eval[IndexedSeq[Int]]("""let c = calls.het and v = Variant("1", 1, "A", "T") in c.oneHotAlleles(v)""").contains(IndexedSeq(1, 1)))
-    assert(eval[IndexedSeq[Int]]("""let c = calls.het and v = Variant("1", 1, "A", "T") and g = c.toGenotype() in g.oneHotAlleles(v)""").contains(IndexedSeq(1, 1)))
     assert(eval[IndexedSeq[Int]]("""let c = calls.het and v = Variant("1", 1, "A", "T") in c.oneHotGenotype(v)""").contains(IndexedSeq(0, 1, 0)))
-    assert(eval[IndexedSeq[Int]]("""let c = calls.het and v = Variant("1", 1, "A", "T") and g = c.toGenotype() in g.oneHotGenotype(v)""").contains(IndexedSeq(0, 1, 0)))
 
-    assert(eval[Boolean]("calls.homVar.isCalled()").contains(true))
+    assert(eval[Boolean]("isDefined(calls.homVar)").contains(true))
     assert(eval[Boolean]("calls.homVar.isHomRef()").contains(false))
     assert(eval[Boolean]("calls.homVar.isHet()").contains(false))
     assert(eval[Boolean]("calls.homVar.isHomVar()").contains(true))
     assert(eval[Boolean]("calls.homVar.nNonRefAlleles() == 2").contains(true))
     assert(eval[IndexedSeq[Int]]("""let c = calls.homVar and v = Variant("1", 1, "A", "T") in c.oneHotAlleles(v)""").contains(IndexedSeq(0, 2)))
-    assert(eval[IndexedSeq[Int]]("""let c = calls.homVar and v = Variant("1", 1, "A", "T") and g = c.toGenotype() in g.oneHotAlleles(v)""").contains(IndexedSeq(0, 2)))
     assert(eval[IndexedSeq[Int]]("""let c = calls.homVar and v = Variant("1", 1, "A", "T") in c.oneHotGenotype(v)""").contains(IndexedSeq(0, 0, 1)))
-    assert(eval[IndexedSeq[Int]]("""let c = calls.homVar and v = Variant("1", 1, "A", "T") and g = c.toGenotype() in g.oneHotGenotype(v)""").contains(IndexedSeq(0, 0, 1)))
 
     {
       val x = eval[Map[String, IndexedSeq[Int]]]("[1,2,3,4,5].groupBy(k => if (k % 2 == 0) \"even\" else \"odd\")")
@@ -906,11 +922,11 @@ class ExprSuite extends SparkSuite {
 
     {
       val (t, r) = evalWithType("2 ** 2")
-      assert(t == TDouble)
+      assert(t.isOfType(TFloat64()))
       assert(r.contains(4))
 
       val (t2, r2) = evalWithType("2 ** 3.0")
-      assert(t2 == TDouble)
+      assert(t2.isOfType(TFloat64()))
       assert(r2.contains(8.0))
 
       assert(eval("3.123 ** 5.123") == eval("pow(3.123, 5.123)"))
@@ -924,8 +940,8 @@ class ExprSuite extends SparkSuite {
     assert(eval("1 == 1.0").contains(true))
     assert(eval("[1,2] == [1.0, 2.0]").contains(true))
     assert(eval("[1,2] != [1.1, 2.0]").contains(true))
-    assert(eval("{a: 1, b: NA: Genotype} != {a: 2, b: NA: Genotype}").contains(true))
-    assert(eval("{a: 1, b: NA: Genotype} == {a: 1, b: NA: Genotype}").contains(true))
+    assert(eval("{a: 1, b: NA: Call} != {a: 2, b: NA: Call}").contains(true))
+    assert(eval("{a: 1, b: NA: Call} == {a: 1, b: NA: Call}").contains(true))
 
     TestUtils.interceptFatal("Cannot compare arguments") {
       eval("1 == str(1)")
@@ -933,11 +949,6 @@ class ExprSuite extends SparkSuite {
     TestUtils.interceptFatal("Cannot compare arguments") {
       eval("str(1) == 1")
     }
-
-    assert(D_==(
-      eval[Double]("""Genotype(Variant("1", 1, "A", "T"), [0.01, 0.95, 0.04]).dosage()""").get,
-      eval[Double]("""([0.01, 0.95, 0.04] * [0, 1, 2]).sum()""").get,
-      tolerance = 0.01))
 
     assert(eval("Dict([1,2,3], [1,2,3])").contains(Map(1 -> 1, 2 -> 2, 3 -> 3)))
     assert(eval("""Dict(["foo", "bar"], [1,2])""").contains(Map("foo" -> 1, "bar" -> 2)))
@@ -948,13 +959,13 @@ class ExprSuite extends SparkSuite {
   }
 
   @Test def testParseTypes() {
-    val s1 = "SIFT_Score: Double, Age: Int"
+    val s1 = "SIFT_Score: Float, Age: Int"
     val s2 = ""
-    val s3 = "SIFT_Score: Double, Age: Int, SIFT2: BadType"
+    val s3 = "SIFT_Score: Float, Age: Int, SIFT2: BadType"
 
-    assert(Parser.parseAnnotationTypes(s1) == Map("SIFT_Score" -> TDouble, "Age" -> TInt))
+    assert(Parser.parseAnnotationTypes(s1) == Map("SIFT_Score" -> TFloat64(), "Age" -> TInt32()))
     assert(Parser.parseAnnotationTypes(s2) == Map.empty[String, Type])
-    intercept[HailException](Parser.parseAnnotationTypes(s3) == Map("SIFT_Score" -> TDouble, "Age" -> TInt))
+    intercept[HailException](Parser.parseAnnotationTypes(s3) == Map("SIFT_Score" -> TFloat64(), "Age" -> TInt32()))
   }
 
   @Test def testTypePretty() {
@@ -964,16 +975,15 @@ class ExprSuite extends SparkSuite {
     val sb = new StringBuilder
     check(forAll { (t: Type) =>
       sb.clear()
-      t.pretty(sb, compact = true, printAttrs = true)
+      t.pretty(sb, compact = true)
       val res = sb.result()
       val parsed = Parser.parseType(res)
       t == parsed
     })
     check(forAll { (t: Type) =>
       sb.clear()
-      t.pretty(sb, printAttrs = true)
+      t.pretty(sb)
       val res = sb.result()
-      //      println(res)
       val parsed = Parser.parseType(res)
       t == parsed
     })
@@ -1022,7 +1032,7 @@ class ExprSuite extends SparkSuite {
         JSONAnnotationImpex.importAnnotation(parse(string), t) == a
       }
 
-      property("table") = forAll(g.filter { case (t, a) => t != TDouble && a != null }.resize(10)) { case (t, a) =>
+      property("table") = forAll(g.filter { case (t, a) => !t.isOfType(TFloat64()) && a != null }.resize(10)) { case (t, a) =>
         TableAnnotationImpex.importAnnotation(TableAnnotationImpex.exportAnnotation(a, t), t) == a
       }
 
@@ -1035,29 +1045,29 @@ class ExprSuite extends SparkSuite {
   }
 
   @Test def testIfNumericPromotion() {
-    val ec = EvalContext(Map("c" -> (0, TBoolean), "l" -> (1, TLong), "f" -> (2, TFloat)))
+    val ec = EvalContext(Map("c" -> (0, TBoolean()), "l" -> (1, TInt64()), "f" -> (2, TFloat32())))
 
     def eval[T](s: String): (Type, Option[T]) = {
       val (t, f) = Parser.parseExpr(s, ec)
       (t, Option(f()).map(_.asInstanceOf[T]))
     }
 
-    assert(Parser.parseExpr("if (c) 0 else 0", ec)._1 == TInt)
-    assert(Parser.parseExpr("if (c) 0 else l", ec)._1 == TLong)
-    assert(Parser.parseExpr("if (c) f else 0", ec)._1 == TFloat)
-    assert(Parser.parseExpr("if (c) 0 else 0.0", ec)._1 == TDouble)
-    assert(eval[Int]("(if (true) 0 else 0.toLong()).toInt()") == (TInt, Some(0)))
-    assert(eval[Int]("(if (true) 0 else 0.toFloat()).toInt()") == (TInt, Some(0)))
+    assert(Parser.parseExpr("if (c) 0 else 0", ec)._1.isInstanceOf[TInt32])
+    assert(Parser.parseExpr("if (c) 0 else l", ec)._1.isInstanceOf[TInt64])
+    assert(Parser.parseExpr("if (c) f else 0", ec)._1.isInstanceOf[TFloat32])
+    assert(Parser.parseExpr("if (c) 0 else 0.0", ec)._1.isInstanceOf[TFloat64])
+    assert(eval[Int]("(if (true) 0 else 0.toInt64()).toInt32()") == (TInt32(), Some(0)))
+    assert(eval[Int]("(if (true) 0 else 0.toFloat32()).toInt32()") == (TInt32(), Some(0)))
   }
 
   @Test def testRegistryTypeCheck() {
-    val expr = """let v = Variant("1:650000:A:T") and ref = v.ref and isHet = v.isAutosomal and s = "1" in s.toInt"""
+    val expr = """let v = Variant("1:650000:A:T") and ref = v.ref and isHet = v.isAutosomal and s = "1" in s.toInt32()"""
     val (t, f) = Parser.parseExpr(expr, EvalContext())
-    assert(f().asInstanceOf[Int] == 1 && t == TInt)
+    assert(f().asInstanceOf[Int] == 1 && t.isInstanceOf[TInt32])
   }
 
   @Test def testOrdering() {
-    val intOrd = TInt.ordering(true)
+    val intOrd = TInt32().ordering(true)
 
     assert(intOrd.compare(-2, -2) == 0)
     assert(intOrd.compare(null, null) == 0)
@@ -1070,9 +1080,10 @@ class ExprSuite extends SparkSuite {
       b <- t.genValue) yield (t, a, b)
 
     val p = forAll(g) { case (t, a, b) =>
-        val ord = t.ordering(missingGreatest = true)
-        ord.compare(a, b) == - ord.compare(b, a)
+      val ord = t.ordering(missingGreatest = true)
+      ord.compare(a, b) == -ord.compare(b, a)
     }
+    p.check()
   }
 
   @Test def testContext() {

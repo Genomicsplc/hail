@@ -3,7 +3,10 @@ package is.hail.stats
 import is.hail.SparkSuite
 import is.hail.check.Prop._
 import is.hail.check.Properties
+import is.hail.io.vcf.ExportVCF
+import is.hail.methods.VariantQC
 import is.hail.utils._
+import is.hail.testUtils._
 import is.hail.variant._
 import org.testng.annotations.Test
 
@@ -28,16 +31,20 @@ class InbreedingCoefficientSuite extends SparkSuite {
 
   object Spec extends Properties("InbreedingCoefficient") {
 
-    val plinkSafeBiallelicVDS = VariantSampleMatrix.gen(hc, VSMSubgen.plinkSafeBiallelic)
+    val plinkSafeBiallelicVDS = MatrixTable.gen(hc, VSMSubgen.plinkSafeBiallelic)
       .resize(1000)
-      .map(vds => vds.filterVariants { case (v, va, gs) => v.isAutosomalOrPseudoAutosomal && v.contig.toUpperCase != "X" && v.contig.toUpperCase != "Y" })
+      .map { vds =>
+        val gr = vds.genomeReference
+        vds.filterVariants { case (v1, va, gs) =>
+        val v = v1.asInstanceOf[Variant]
+        v.isAutosomalOrPseudoAutosomal(gr) && v.contig.toUpperCase != "X" && v.contig.toUpperCase != "Y"
+      }}
       .filter(vds => vds.countVariants > 2 && vds.nSamples >= 2)
 
     property("hail generates same results as PLINK v1.9") =
-      forAll(plinkSafeBiallelicVDS) { case (vds: VariantSampleMatrix[Genotype]) =>
+      forAll(plinkSafeBiallelicVDS) { case (vds: MatrixTable) =>
 
-        val vds2 = vds
-          .variantQC()
+        val vds2 = VariantQC(vds)
           .filterVariantsExpr("va.qc.AC > 1 && va.qc.AF >= 1e-8 && va.qc.nCalled * 2 - va.qc.AC > 1 && va.qc.AF <= 1 - 1e-8")
 
         if (vds2.nSamples < 5 || vds2.countVariants() < 5) {
@@ -51,9 +58,9 @@ class InbreedingCoefficientSuite extends SparkSuite {
           val vcfFile = root + ".vcf"
           val ibcFile = root + ".het"
 
-          val vds3 = vds2.annotateSamplesExpr("sa.het = gs.inbreeding(g => va.qc.AF)")
+          val vds3 = vds2.annotateSamplesExpr("sa.het = gs.map(g => g.GT).inbreeding(g => va.qc.AF)")
 
-          vds3.exportVCF(vcfFile)
+          ExportVCF(vds3, vcfFile)
 
           hadoopConf.copy(vcfFile, localVCFFile)
 

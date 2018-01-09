@@ -1,12 +1,13 @@
 package is.hail.methods
 
 import is.hail.HailContext
-import is.hail.expr.{EvalContext, Parser, TDouble, TLong, TString, TStruct, TVariant}
-import is.hail.keytable.KeyTable
-import is.hail.annotations.Annotation
+import is.hail.expr.{EvalContext, Parser, TFloat64, TInt64, TString, TStruct, TVariant}
+import is.hail.table.Table
+import is.hail.annotations.{Annotation, Region, RegionValue, RegionValueBuilder, UnsafeRow}
 import is.hail.expr._
+import is.hail.variant.{GenomeReference, Genotype, HardCallView, Variant, MatrixTable}
 import is.hail.methods.IBD.generateComputeMaf
-import is.hail.variant.{Genotype, Variant, VariantDataset}
+import is.hail.rvd.RVD
 import org.apache.spark.rdd.RDD
 import is.hail.utils._
 import org.apache.spark.sql.Row
@@ -19,7 +20,18 @@ object IBDInfo {
   }
 
   val signature =
-    TStruct(("Z0", TDouble), ("Z1", TDouble), ("Z2", TDouble), ("PI_HAT", TDouble))
+    TStruct(("Z0", TFloat64()), ("Z1", TFloat64()), ("Z2", TFloat64()), ("PI_HAT", TFloat64()))
+
+  def fromRegionValue(rv: RegionValue): IBDInfo =
+    fromRegionValue(rv.region, rv.offset)
+
+  def fromRegionValue(region: Region, offset: Long): IBDInfo = {
+    val Z0 = region.loadDouble(signature.loadField(region, offset, 0))
+    val Z1 = region.loadDouble(signature.loadField(region, offset, 1))
+    val Z2 = region.loadDouble(signature.loadField(region, offset, 2))
+    val PI_HAT = region.loadDouble(signature.loadField(region, offset, 3))
+    IBDInfo(Z0, Z1, Z2, PI_HAT)
+  }
 }
 
 case class IBDInfo(Z0: Double, Z1: Double, Z2: Double, PI_HAT: Double) {
@@ -29,11 +41,29 @@ case class IBDInfo(Z0: Double, Z1: Double, Z2: Double, PI_HAT: Double) {
   def hasNaNs: Boolean = Array(Z0, Z1, Z2, PI_HAT).exists(_.isNaN)
 
   def toAnnotation: Annotation = Annotation(Z0, Z1, Z2, PI_HAT)
+
+  def toRegionValue(rvb: RegionValueBuilder) {
+    rvb.addDouble(Z0)
+    rvb.addDouble(Z1)
+    rvb.addDouble(Z2)
+    rvb.addDouble(PI_HAT)
+  }
 }
 
 object ExtendedIBDInfo {
   val signature =
-    TStruct(("ibd", IBDInfo.signature), ("ibs0", TLong), ("ibs1", TLong), ("ibs2", TLong))
+    TStruct(("ibd", IBDInfo.signature), ("ibs0", TInt64()), ("ibs1", TInt64()), ("ibs2", TInt64()))
+
+  def fromRegionValue(rv: RegionValue): ExtendedIBDInfo =
+    fromRegionValue(rv.region, rv.offset)
+
+  def fromRegionValue(region: Region, offset: Long): ExtendedIBDInfo = {
+    val ibd = IBDInfo.fromRegionValue(region, signature.loadField(region, offset, 0))
+    val ibs0 = region.loadLong(signature.loadField(region, offset, 1))
+    val ibs1 = region.loadLong(signature.loadField(region, offset, 2))
+    val ibs2 = region.loadLong(signature.loadField(region, offset, 3))
+    ExtendedIBDInfo(ibd, ibs0, ibs1, ibs2)
+  }
 }
 
 case class ExtendedIBDInfo(ibd: IBDInfo, ibs0: Long, ibs1: Long, ibs2: Long) {
@@ -43,6 +73,15 @@ case class ExtendedIBDInfo(ibd: IBDInfo, ibs0: Long, ibs1: Long, ibs2: Long) {
   def hasNaNs: Boolean = ibd.hasNaNs
 
   def toAnnotation: Annotation = Annotation(ibd.toAnnotation, ibs0, ibs1, ibs2)
+
+  def toRegionValue(rvb: RegionValueBuilder) {
+    rvb.startStruct()
+    ibd.toRegionValue(rvb)
+    rvb.endStruct()
+    rvb.addLong(ibs0)
+    rvb.addLong(ibs1)
+    rvb.addLong(ibs2)
+  }
 }
 
 case class IBSExpectations(
@@ -83,9 +122,16 @@ object IBD {
     indicator(gt.j == 0) + indicator(gt.k == 0)
   }
 
-  def ibsForGenotypes(gs: Iterable[Genotype], maybeMaf: Option[Double]): IBSExpectations = {
+  def ibsForGenotypes(gs: HardCallView, maybeMaf: Option[Double]): IBSExpectations = {
     def calculateCountsFromMAF(maf: Double) = {
-      val Na = gs.count(_.gt.isDefined) * 2.0
+      var count = 0
+      var i = 0
+      while (i < gs.getLength) {
+        gs.setGenotype(i)
+        if (gs.hasGT) count += 1
+        i += 1
+      }
+      val Na = count * 2.0
       val p = 1 - maf
       val q = maf
       val x = Na * p
@@ -94,8 +140,16 @@ object IBD {
     }
 
     def estimateFrequenciesFromSample = {
-      val (na, x) = gs.foldLeft((0, 0d)) { case ((na, sum), g) =>
-        (na + g.gt.map(x => 2).getOrElse(0), sum + g.gt.map(countRefs).getOrElse(0))
+      var na = 0
+      var x = 0.0
+      var i = 0
+      while (i < gs.getLength) {
+        gs.setGenotype(i)
+        if (gs.hasGT) {
+          na += 2
+          x += countRefs(gs.getGT)
+        }
+        i += 1
       }
       val Na = na.toDouble
       val y = Na - x
@@ -149,16 +203,39 @@ object IBD {
 
   final val chunkSize = 1024
 
-  def computeIBDMatrix(vds: VariantDataset, computeMaf: Option[(Variant, Annotation) => Double], bounded: Boolean): RDD[((Int, Int), ExtendedIBDInfo)] = {
-    val unnormalizedIbse = vds.rdd.map { case (v, (va, gs)) => ibsForGenotypes(gs, computeMaf.map(f => f(v, va))) }
-      .fold(IBSExpectations.empty)(_ join _)
-
-    val ibse = unnormalizedIbse.normalized
+  def computeIBDMatrix(vds: MatrixTable,
+    computeMaf: Option[(RegionValue) => Double],
+    min: Option[Double],
+    max: Option[Double],
+    sampleIds: IndexedSeq[String],
+    bounded: Boolean): RDD[RegionValue] = {
 
     val nSamples = vds.nSamples
 
-    val chunkedGenotypeMatrix = vds.rdd
-      .map { case (v, (va, gs)) => gs.map(_.gt.map(IBSFFI.gtToCRep).getOrElse(IBSFFI.missingGTCRep)).toArray[Byte] }
+    val rowType = vds.rowType
+    val unnormalizedIbse = vds.rdd2.mapPartitions { it =>
+      val view = HardCallView(rowType)
+      it.map { rv =>
+        view.setRegion(rv)
+        ibsForGenotypes(view, computeMaf.map(f => f(rv)))
+      }
+    }.fold(IBSExpectations.empty)(_ join _)
+
+    val ibse = unnormalizedIbse.normalized
+
+    val chunkedGenotypeMatrix = vds.rdd2.mapPartitions { it =>
+      val view = HardCallView(rowType)
+      it.map { rv =>
+        view.setRegion(rv)
+        Array.tabulate[Byte](view.getLength) { i =>
+          view.setGenotype(i)
+          if (view.hasGT)
+            IBSFFI.gtToCRep(view.getGT)
+          else
+            IBSFFI.missingGTCRep
+        }
+      }
+    }
       .zipWithIndex()
       .flatMap { case (gts, variantId) =>
         val vid = (variantId % chunkSize).toInt
@@ -166,7 +243,7 @@ object IBD {
           .zipWithIndex
           .map { case (gtGroup, i) => ((i, variantId / chunkSize), (vid, gtGroup)) }
       }
-      .aggregateByKey(Array.tabulate(chunkSize * chunkSize)((i) => IBSFFI.missingGTCRep))({ case (x, (vid, gs)) =>
+      .aggregateByKey(Array.fill(chunkSize * chunkSize)(IBSFFI.missingGTCRep))({ case (x, (vid, gs)) =>
         for (i <- gs.indices) x(vid * chunkSize + i) = gs(i)
         x
       }, { case (x, y) =>
@@ -191,48 +268,43 @@ object IBD {
         }
         a
       }
-      .mapValues { ibs =>
-        val arr = new Array[ExtendedIBDInfo](chunkSize * chunkSize)
-        var si = 0
-        var sj = 0
-        while (si != chunkSize * chunkSize) {
-          while (sj != chunkSize) {
-            arr(si + sj) =
-              calculateIBDInfo(ibs(si * 3 + sj * 3), ibs(si * 3 + sj * 3 + 1), ibs(si * 3 + sj * 3 + 2), ibse, bounded)
-            sj += 1
-          }
-          sj = 0
-          si += chunkSize
+      .mapPartitions { it =>
+        val region = Region()
+        val rv = RegionValue(region)
+        val rvb = new RegionValueBuilder(region)
+        for {
+          ((iChunk, jChunk), ibses) <- it
+          si <- (0 until chunkSize).iterator
+          sj <- (0 until chunkSize).iterator
+          i = iChunk * chunkSize + si
+          j = jChunk * chunkSize + sj
+          if j > i && j < nSamples && i < nSamples
+          idx = si * chunkSize + sj
+          eibd = calculateIBDInfo(ibses(idx * 3), ibses(idx * 3 + 1), ibses(idx * 3 + 2), ibse, bounded)
+          if min.forall(eibd.ibd.PI_HAT >= _) && max.forall(eibd.ibd.PI_HAT <= _)
+        } yield {
+          region.clear()
+          rvb.start(ibdSignature)
+          rvb.startStruct()
+          rvb.addString(sampleIds(i))
+          rvb.addString(sampleIds(j))
+          eibd.toRegionValue(rvb)
+          rvb.endStruct()
+          rv.setOffset(rvb.end())
+          rv
         }
-        arr
       }
-      .flatMap { case ((i, j), ibses) =>
-        val arr = new Array[((Int, Int), ExtendedIBDInfo)](chunkSize * chunkSize)
-        var si = 0
-        var sj = 0
-        while (si != chunkSize) {
-          while (sj != chunkSize) {
-            arr(si * chunkSize + sj) =
-              ((i * chunkSize + si, j * chunkSize + sj), ibses(si * chunkSize + sj))
-            sj += 1
-          }
-          sj = 0
-          si += 1
-        }
-        arr
-      }
-      .filter { case ((i, j), ibd) => j > i && j < nSamples && i < nSamples }
   }
 
-
-  def validateAndCall(vds: VariantDataset,
-    computeMafExpr: Option[String],
-    bounded: Boolean,
-    min: Option[Double],
-    max: Option[Double]): RDD[((Annotation, Annotation), ExtendedIBDInfo)] = {
+  def apply(vds: MatrixTable,
+    computeMafExpr: Option[String] = None,
+    bounded: Boolean = true,
+    min: Option[Double] = None,
+    max: Option[Double] = None): Table = {
 
     min.foreach(min => optionCheckInRangeInclusive(0.0, 1.0)("minimum", min))
     max.foreach(max => optionCheckInRangeInclusive(0.0, 1.0)("maximum", max))
+    vds.requireUniqueSamples("ibd")
 
     min.liftedZip(max).foreach { case (min, max) =>
       if (min > max) {
@@ -241,39 +313,45 @@ object IBD {
     }
 
     val computeMaf = computeMafExpr.map(generateComputeMaf(vds, _))
+    val sampleIds = vds.sampleIds.asInstanceOf[IndexedSeq[String]]
 
-    apply(vds, computeMaf, bounded, min, max)
+    val ktRdd2 = computeIBDMatrix(vds, computeMaf, min, max, sampleIds, bounded)
+    new Table(vds.hc, ktRdd2, ibdSignature, Array("i", "j"))
   }
 
-  def apply(vds: VariantDataset,
-    computeMaf: Option[(Variant, Annotation) => Double] = None,
-    bounded: Boolean = true,
-    min: Option[Double] = None,
-    max: Option[Double] = None): RDD[((Annotation, Annotation), ExtendedIBDInfo)] = {
+  private val (ibdSignature, ibdMerger) = TStruct(("i", TString()), ("j", TString())).merge(ExtendedIBDInfo.signature)
 
-    val sampleIds = vds.sampleIds
-
-    computeIBDMatrix(vds, computeMaf, bounded)
-      .filter { case (_, ibd) =>
-        min.forall(ibd.ibd.PI_HAT >= _) &&
-          max.forall(ibd.ibd.PI_HAT <= _)
-      }
-      .map { case ((i, j), ibd) => ((sampleIds(i), sampleIds(j)), ibd) }
-  }
-
-
-  private val (ibdSignature, ibdMerger) = TStruct(("i", TString), ("j", TString)).merge(ExtendedIBDInfo.signature)
-  def toKeyTable(sc: HailContext, ibdMatrix: RDD[((Annotation, Annotation), ExtendedIBDInfo)]): KeyTable = {
+  def toKeyTable(sc: HailContext, ibdMatrix: RDD[((Annotation, Annotation), ExtendedIBDInfo)]): Table = {
     val ktRdd = ibdMatrix.map { case ((i, j), eibd) => ibdMerger(Annotation(i, j), eibd.toAnnotation).asInstanceOf[Row] }
-    KeyTable(sc, ktRdd, ibdSignature, Array("i", "j"))
+    Table(sc, ktRdd, ibdSignature, Array("i", "j"))
   }
 
-  private[methods] def generateComputeMaf(vds: VariantDataset, computeMafExpr: String): (Variant, Annotation) => Double = {
-    val mafSymbolTable = Map("v" -> (0, TVariant), "va" -> (1, vds.vaSignature))
+  def toRDD(kt: Table): RDD[((Annotation, Annotation), ExtendedIBDInfo)] = {
+    val rvd = kt.rvd
+    rvd.map { rv =>
+      val region = rv.region
+      val i = TString.loadString(region, ibdSignature.loadField(rv, 0))
+      val j = TString.loadString(region, ibdSignature.loadField(rv, 1))
+      val ibd = IBDInfo.fromRegionValue(region, ibdSignature.loadField(rv, 2))
+      val ibs0 = region.loadLong(ibdSignature.loadField(rv, 3))
+      val ibs1 = region.loadLong(ibdSignature.loadField(rv, 4))
+      val ibs2 = region.loadLong(ibdSignature.loadField(rv, 5))
+      val eibd = ExtendedIBDInfo(ibd, ibs0, ibs1, ibs2)
+      ((i, j), eibd)
+    }
+  }
+
+  private[methods] def generateComputeMaf(vds: MatrixTable,
+    computeMafExpr: String): (RegionValue) => Double = {
+
+    val mafSymbolTable = Map("v" -> (0, vds.vSignature), "va" -> (1, vds.vaSignature))
     val mafEc = EvalContext(mafSymbolTable)
     val computeMafThunk = Parser.parseTypedExpr[java.lang.Double](computeMafExpr, mafEc)
+    val rowType = vds.rowType
 
-    { (v: Variant, va: Annotation) =>
+    { (rv: RegionValue) =>
+      val v = Variant.fromRegionValue(rv.region, rowType.loadField(rv, 1))
+      val va = UnsafeRow.read(rowType.fieldType(2), rv.region, rowType.loadField(rv, 2))
       mafEc.setAll(v, va)
       val maf = computeMafThunk()
 
@@ -287,46 +365,4 @@ object IBD {
     }
   }
 
-}
-
-object IBDPrune {
-  def apply(vds: VariantDataset,
-    threshold: Double,
-    tiebreakerExpr: Option[String] = None,
-    computeMafExpr: Option[String] = None,
-    bounded: Boolean = true): VariantDataset = {
-
-    val sc = vds.sparkContext
-
-    val sampleIDs: IndexedSeq[Annotation] = vds.sampleIds
-    val sampleAnnotations = sc.broadcast(vds.sampleAnnotations)
-
-    val computeMaf = computeMafExpr.map(generateComputeMaf(vds, _))
-
-    val comparisonSymbolTable = Map("s1" -> (0, TString), "sa1" -> (1, vds.saSignature), "s2" -> (2, TString), "sa2" -> (3, vds.saSignature))
-    val compEc = EvalContext(comparisonSymbolTable)
-    val optCompThunk = tiebreakerExpr.map(Parser.parseTypedExpr[java.lang.Integer](_, compEc))
-
-    val optCompareFunc = optCompThunk.map(compThunk => {
-      (s1: Int, s2: Int) => {
-        compEc.set(0, sampleIDs(s1))
-        compEc.set(1, sampleAnnotations.value(s1))
-        compEc.set(2, sampleIDs(s2))
-        compEc.set(3, sampleAnnotations.value(s2))
-        compThunk().toInt
-      }
-    })
-
-    val computedIBDs: RDD[((Int, Int), Double)] = IBD.computeIBDMatrix(vds, computeMaf, bounded)
-      .map{case ((v1, v2), info) => ((v1, v2), info.ibd.PI_HAT)}
-
-    info("Performing IBD Prune")
-
-    val setToKeep = MaximalIndependentSet.ofIBDMatrix(computedIBDs, threshold, 0 until sampleIDs.size, optCompareFunc)
-      .map(id => sampleIDs(id.toInt))
-
-    info("Pruning Complete")
-
-    vds.filterSamples((id, _) => setToKeep.contains(id))
-  }
 }

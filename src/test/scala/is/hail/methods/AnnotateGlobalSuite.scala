@@ -4,17 +4,17 @@ import is.hail.SparkSuite
 import is.hail.annotations.Annotation
 import is.hail.expr._
 import is.hail.utils._
+import is.hail.testUtils._
 import org.apache.spark.util.StatCounter
 import org.testng.annotations.Test
-
 
 class AnnotateGlobalSuite extends SparkSuite {
   @Test def test() {
 
-    val vds = hc.importVCF("src/test/resources/sample2.vcf")
-      .splitMulti()
-      .variantQC()
-      .sampleQC()
+    var vds = hc.importVCF("src/test/resources/sample2.vcf")
+    vds = SplitMulti(vds)
+    vds = VariantQC(vds)
+    vds = SampleQC(vds)
 
     val (afDist, _) = vds.queryVariants("variants.map(v => va.qc.AF).stats()")
     val (singStats, _) = vds.querySamples("samples.filter(s => sa.qc.nSingleton > 2).count()")
@@ -24,7 +24,7 @@ class AnnotateGlobalSuite extends SparkSuite {
     val qSingleton = vds.querySA("sa.qc.nSingleton")._2
 
     val sCount = vds.sampleAnnotations.count(sa =>
-      qSingleton(sa).asInstanceOf[Int] > 2)
+      qSingleton(sa).asInstanceOf[Long] > 2)
 
     assert(singStats == sCount)
 
@@ -81,9 +81,9 @@ class AnnotateGlobalSuite extends SparkSuite {
     val (t, res) = vds.queryGlobal("global.genes")
 
     assert(t == TArray(TStruct(
-      ("GENE", TString),
-      ("PLI", TDouble),
-      ("EXAC_LOF_COUNT", TInt))))
+      ("GENE", TString()),
+      ("PLI", TFloat64()),
+      ("EXAC_LOF_COUNT", TInt32()))))
 
     assert(res == IndexedSeq(
       Annotation("Gene1", "0.12312".toDouble, 2),

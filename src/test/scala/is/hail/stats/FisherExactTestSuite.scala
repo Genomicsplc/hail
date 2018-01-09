@@ -5,7 +5,7 @@ import is.hail.check.Gen._
 import is.hail.check.Prop._
 import is.hail.check.Properties
 import is.hail.utils._
-import is.hail.variant.{VariantDataset, _}
+import is.hail.variant.{MatrixTable, _}
 import org.testng.annotations.Test
 
 import scala.language.postfixOps
@@ -78,7 +78,7 @@ class FisherExactTestSuite extends SparkSuite {
       }
 
     property("expr gives same result as class") =
-      forAll(VariantSampleMatrix.gen[Genotype](hc, VSMSubgen.random)) { (vds: VariantDataset) =>
+      forAll(MatrixTable.gen(hc, VSMSubgen.random)) { (vds: MatrixTable) =>
         val sampleIds = vds.sampleIds
         val phenotypes = sampleIds.zipWithIndex.map { case (sample, i) =>
           if (i % 3 == 0)
@@ -97,19 +97,19 @@ class FisherExactTestSuite extends SparkSuite {
 
         val vds2 = vds.annotateSamplesTable(hc.importTable(phenotypeFile).keyBy("Sample"), root = "sa.pheno")
           .annotateVariantsExpr(
-            """va.macCase = gs.filter(g => sa.pheno == "ADHD" && g.isHet()).count() +
-              |2 * gs.filter(g => sa.pheno == "ADHD" && g.isHomVar()).count()""".stripMargin)
+            """va.macCase = gs.filter(g => sa.pheno == "ADHD" && g.GT.isHet()).count() +
+              |2 * gs.filter(g => sa.pheno == "ADHD" && g.GT.isHomVar()).count()""".stripMargin)
           .annotateVariantsExpr(
-            """va.majCase = gs.filter(g => sa.pheno == "ADHD" && g.isHet()).count() +
-              |2 * gs.filter(g => sa.pheno == "ADHD" && g.isHomRef()).count()""".stripMargin)
+            """va.majCase = gs.filter(g => sa.pheno == "ADHD" && g.GT.isHet()).count() +
+              |2 * gs.filter(g => sa.pheno == "ADHD" && g.GT.isHomRef()).count()""".stripMargin)
           .annotateVariantsExpr(
-            """va.macControl = gs.filter(g => sa.pheno == "Control" && g.isHet()).count() +
-              |2 * gs.filter(g => sa.pheno == "ADHD" && g.isHomVar()).count()""".stripMargin)
+            """va.macControl = gs.filter(g => sa.pheno == "Control" && g.GT.isHet()).count() +
+              |2 * gs.filter(g => sa.pheno == "ADHD" && g.GT.isHomVar()).count()""".stripMargin)
           .annotateVariantsExpr(
-            """va.majControl = gs.filter(g => sa.pheno == "Control" && g.isHet()).count() +
-              |2 * gs.filter(g => sa.pheno == "ADHD" && g.isHomRef()).count()""".stripMargin)
+            """va.majControl = gs.filter(g => sa.pheno == "Control" && g.GT.isHet()).count() +
+              |2 * gs.filter(g => sa.pheno == "ADHD" && g.GT.isHomRef()).count()""".stripMargin)
           .annotateVariantsExpr(
-            """va.fet = fet(va.macCase.toInt(), va.majCase.toInt(), va.macControl.toInt(), va.majControl.toInt())""")
+            """va.fet = fet(va.macCase.toInt32(), va.majCase.toInt32(), va.macControl.toInt32(), va.majControl.toInt32())""")
 
 
         val (_, q1) = vds2.queryVA("va.macCase")

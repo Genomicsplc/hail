@@ -3,6 +3,7 @@ package is.hail.stats
 import breeze.linalg._
 import breeze.stats.mean
 import is.hail.utils._
+import is.hail.variant.HardCallView
 import is.hail.{SparkSuite, TestUtils, stats}
 import org.apache.spark.mllib.linalg.distributed.IndexedRowMatrix
 import org.testng.annotations.Test
@@ -23,7 +24,14 @@ class ComputeRRMSuite extends SparkSuite {
     val vds = stats.vdsFromGtMatrix(hc)(G0)
 
     val n = vds.nSamples
-    val gtVects = vds.rdd.collect().flatMap { case (v, (va, gs)) => RegressionUtils.normalizedHardCalls(gs, n) }.map(DenseVector(_))
+
+    val rt = vds.rowType
+    val gtVects = vds.rdd2.mapPartitions {it =>
+      val view = HardCallView(rt)
+      it.flatMap { rv =>
+        view.setRegion(rv)
+        RegressionUtils.normalizedHardCalls(view, n) }.map(DenseVector(_))
+      }.collect()
 
     for (gts <- gtVects) {
       assert(math.abs(mean(gts)) < 1e-6)
@@ -35,8 +43,8 @@ class ComputeRRMSuite extends SparkSuite {
       W(::, i) *= math.sqrt(n) / norm(W(::, i))
     }
     val Klocal = (W * W.t) / W.cols.toDouble
-    val KwithoutBlock = ComputeRRM(vds)._1
-    val KwithBlock = ComputeRRM(vds, forceBlock = true)._1
+    val KwithoutBlock = ComputeRRM(vds).matrix
+    val KwithBlock = ComputeRRM(vds, forceBlock = true).matrix
 
 
     //RRM originally returned Breeze matrices, now it returns IndexedRowMatrices, but until the interface is locked in
@@ -70,8 +78,8 @@ class ComputeRRMSuite extends SparkSuite {
     }
 
     val K1local = (W1 * W1.t) / W1.cols.toDouble
-    val K1withoutBlock = ComputeRRM(vds1)._1
-    val K1withBlock = ComputeRRM(vds1, forceBlock = true)._1
+    val K1withoutBlock = ComputeRRM(vds1).matrix
+    val K1withBlock = ComputeRRM(vds1, forceBlock = true).matrix
 
     TestUtils.assertMatrixEqualityDouble(K1local, convertToBreeze(K1withoutBlock))
     TestUtils.assertMatrixEqualityDouble(convertToBreeze(K1withBlock), convertToBreeze(K1withoutBlock))

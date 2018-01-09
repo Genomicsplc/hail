@@ -5,6 +5,7 @@ import java.util.regex.Pattern
 import is.hail.annotations.Annotation
 import is.hail.expr._
 import is.hail.utils.StringEscapeUtils._
+import is.hail.variant.GenomeReference
 import org.apache.spark.SparkContext
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.Row
@@ -12,15 +13,23 @@ import org.apache.spark.sql.Row
 object TextTableReader {
 
   def splitLine(s: String, separator: String, quote: java.lang.Character): Array[String] = {
-    val p = Pattern.compile(separator)
-    val m = p.matcher(s)
 
-    def matchSep(i: Int): Int = {
-      m.region(i, s.length)
-      if (m.lookingAt())
-        m.end() - m.start()
-      else
-        -1
+    val matchSep: Int => Int = separator.length match {
+      case 0 => fatal("Hail does not currently support 0-character separators")
+      case 1 =>
+        val sepChar = separator(0)
+        (i: Int) => if (s(i) == sepChar) 1 else -1
+      case _ =>
+        val p = Pattern.compile(separator)
+        val m = p.matcher(s)
+
+      { (i: Int) =>
+        m.region(i, s.length)
+        if (m.lookingAt())
+          m.end() - m.start()
+        else
+          -1
+      }
     }
 
     val ab = new ArrayBuilder[String]
@@ -37,7 +46,7 @@ object TextTableReader {
         sb.clear()
       } else if (quote != null && c == quote) {
         if (sb.nonEmpty)
-          fatal("opening quote character $quote not at start of field")
+          fatal(s"opening quote character '$quote' not at start of field")
         i += 1 // skip quote
 
         while (i < s.length && s(i) != quote) {
@@ -46,14 +55,14 @@ object TextTableReader {
         }
 
         if (i == s.length)
-          fatal(s"missing terminating quote character $quote")
+          fatal(s"missing terminating quote character '$quote'")
         i += 1 // skip quote
 
         // full field must be quoted
         if (i < s.length) {
-          val l =  matchSep(i)
+          val l = matchSep(i)
           if (l == -1)
-            fatal(s"terminating quote character $quote not at end of field")
+            fatal(s"terminating quote character '$quote' not at end of field")
           i += l
           ab += sb.result()
           sb.clear()
@@ -76,11 +85,12 @@ object TextTableReader {
   val intRegex = """^-?\d+$"""
 
   def imputeTypes(values: RDD[WithContext[String]], header: Array[String],
-    delimiter: String, missing: String, quote: java.lang.Character): Array[Option[Type]] = {
+    delimiter: String, missing: String, quote: java.lang.Character,
+    gr: GenomeReference = GenomeReference.defaultReference): Array[Option[Type]] = {
     val nFields = header.length
     val regexes = Array(booleanRegex, variantRegex, locusRegex, intRegex, doubleRegex).map(Pattern.compile)
 
-    val regexTypes: Array[Type] = Array(TBoolean, TVariant, TLocus, TInt, TDouble)
+    val regexTypes: Array[Type] = Array(TBoolean(), TVariant(gr), TLocus(gr), TInt32(), TFloat64())
     val nRegex = regexes.length
 
     val imputation = values.treeAggregate(MultiArray2.fill[Boolean](nFields, nRegex + 1)(true))({ case (ma, line) =>
@@ -122,7 +132,7 @@ object TextTableReader {
       someIf(!imputation(i, nRegex),
         (0 until nRegex).find(imputation(i, _))
           .map(regexTypes)
-          .getOrElse(TString))
+          .getOrElse(TString()))
     }.toArray
   }
 
@@ -134,7 +144,8 @@ object TextTableReader {
     noHeader: Boolean = false,
     impute: Boolean = false,
     nPartitions: Int = sc.defaultMinPartitions,
-    quote: java.lang.Character = null): (TStruct, RDD[WithContext[Row]]) = {
+    quote: java.lang.Character = null,
+    gr: GenomeReference = GenomeReference.defaultReference): (TStruct, RDD[WithContext[Row]]) = {
     require(files.nonEmpty)
 
     val firstFile = files.head
@@ -145,28 +156,25 @@ object TextTableReader {
       if (filt.isEmpty)
         fatal(
           s"""invalid file: no lines remaining after comment filter
-              |  Offending file: $firstFile""".stripMargin)
+             |  Offending file: $firstFile""".stripMargin)
       else
         filt.next().value
     }
 
     val splitHeader = splitLine(header, separator, quote)
-    val columns = if (noHeader) {
+    val preColumns = if (noHeader) {
       splitHeader
         .indices
         .map(i => s"f$i")
         .toArray
     } else splitHeader.map(unescapeString)
 
-    val nField = columns.length
-
-    val duplicates = columns.duplicates()
+    val (columns, duplicates) = mangle(preColumns)
     if (duplicates.nonEmpty) {
-      fatal(s"invalid header: found duplicate columns [${
-        duplicates.map(x => '"' + x + '"').mkString(", ")
-      }]")
+      warn(s"Found ${ duplicates.length } duplicate ${ plural(duplicates.length, "column") }. Mangled columns follows:\n  @1",
+        duplicates.map { case (pre, post) => s"'$pre' -> '$post'" }.truncatable("\n  "))
     }
-
+    val nField = columns.length
 
     val rdd = sc.textFilesLines(files, nPartitions)
       .filter { line =>
@@ -180,7 +188,7 @@ object TextTableReader {
         info("Reading table to impute column types")
 
         sb.append("Finished type imputation")
-        val imputedTypes = imputeTypes(rdd, columns, separator, missing, quote)
+        val imputedTypes = imputeTypes(rdd, columns, separator, missing, quote, gr)
         columns.zip(imputedTypes).map { case (name, imputedType) =>
           types.get(name) match {
             case Some(t) =>
@@ -193,7 +201,7 @@ object TextTableReader {
                   (name, t)
                 case None =>
                   sb.append(s"\n  Loading column `$name' as type String (no non-missing values for imputation)")
-                  (name, TString)
+                  (name, TString())
               }
           }
         }
@@ -206,7 +214,7 @@ object TextTableReader {
               (c, t)
             case None =>
               sb.append(s"  Loading column `$c' as type `String' (type not specified)\n")
-              (c, TString)
+              (c, TString())
           }
         }
       }

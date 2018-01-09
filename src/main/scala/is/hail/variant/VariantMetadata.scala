@@ -2,7 +2,6 @@ package is.hail.variant
 
 import is.hail.annotations.Annotation
 import is.hail.expr._
-import is.hail.utils._
 
 object VSMLocalValue {
   def apply(sampleIds: IndexedSeq[Annotation]): VSMLocalValue =
@@ -15,7 +14,6 @@ case class VSMLocalValue(
   globalAnnotation: Annotation,
   sampleIds: IndexedSeq[Annotation],
   sampleAnnotations: IndexedSeq[Annotation]) {
-  assert(sampleIds.areDistinct(), s"Sample ID names are not distinct: ${ sampleIds.duplicates().mkString(", ") }")
   assert(sampleIds.length == sampleAnnotations.length)
 
   def nSamples: Int = sampleIds.length
@@ -26,19 +24,20 @@ case class VSMLocalValue(
 }
 
 object VSMFileMetadata {
+  def apply(metadata: VSMMetadata, localValue: VSMLocalValue): VSMFileMetadata = VSMFileMetadata(metadata, localValue, None)
+
   def apply(sampleIds: IndexedSeq[String],
     sampleAnnotations: IndexedSeq[Annotation] = null,
     globalAnnotation: Annotation = Annotation.empty,
-    sSignature: Type = TString,
-    saSignature: Type = TStruct.empty,
-    vSignature: Type = TVariant,
-    vaSignature: Type = TStruct.empty,
-    globalSignature: Type = TStruct.empty,
-    genotypeSignature: Type = TGenotype,
-    wasSplit: Boolean = false,
-    isLinearScale: Boolean = false): VSMFileMetadata = {
+    sSignature: Type = TString(),
+    saSignature: Type = TStruct.empty(),
+    vSignature: Type = TVariant(GenomeReference.defaultReference),
+    vaSignature: Type = TStruct.empty(),
+    globalSignature: Type = TStruct.empty(),
+    // FIXME require
+    genotypeSignature: Type = Genotype.htsGenotypeType): VSMFileMetadata = {
     VSMFileMetadata(
-      VSMMetadata(sSignature, saSignature, vSignature, vaSignature, globalSignature, genotypeSignature, wasSplit, isLinearScale),
+      VSMMetadata(sSignature, saSignature, vSignature, vaSignature, globalSignature, genotypeSignature),
       VSMLocalValue(globalAnnotation, sampleIds,
         if (sampleAnnotations == null)
           Annotation.emptyIndexedSeq(sampleIds.length)
@@ -49,15 +48,14 @@ object VSMFileMetadata {
 
 case class VSMFileMetadata(
   metadata: VSMMetadata,
-  localValue: VSMLocalValue)
+  localValue: VSMLocalValue,
+  partitionCounts: Option[Array[Long]]) {
+}
 
 case class VSMMetadata(
-  sSignature: Type = TString,
-  saSignature: Type = TStruct.empty,
-  vSignature: Type = TVariant,
-  vaSignature: Type = TStruct.empty,
-  globalSignature: Type = TStruct.empty,
-  genotypeSignature: Type = TGenotype,
-  wasSplit: Boolean = false,
-  isLinearScale: Boolean = false,
-  isGenericGenotype: Boolean = false)
+  sSignature: Type = TString(),
+  saSignature: Type = TStruct.empty(),
+  vSignature: Type = TVariant(GenomeReference.defaultReference),
+  vaSignature: Type = TStruct.empty(),
+  globalSignature: Type = TStruct.empty(),
+  genotypeSignature: Type = Genotype.htsGenotypeType)

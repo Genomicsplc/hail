@@ -1,14 +1,15 @@
 package is.hail.stats
 
-
+import is.hail.distributedmatrix.BlockMatrix.ops._
 import breeze.linalg.DenseMatrix
+import is.hail.annotations.UnsafeRow
+import is.hail.expr.TVariant
+import is.hail.methods.KinshipMatrix
 import is.hail.utils._
-
-import is.hail.variant.{Variant, VariantDataset}
+import is.hail.variant.{HardCallView, Locus, MatrixTable, Variant}
 import org.apache.spark.SparkContext
-import org.apache.spark.mllib.linalg.{Matrices, Matrix, Vectors}
 import org.apache.spark.mllib.linalg.distributed.{IndexedRow, IndexedRowMatrix, RowMatrix}
-
+import org.apache.spark.mllib.linalg.{Matrices, Matrix, Vectors}
 
 // diagonal values are approximately m assuming independent variants by Central Limit Theorem
 object ComputeGramian {
@@ -20,8 +21,8 @@ object ComputeGramian {
 
   def withBlock(A: IndexedRowMatrix): IndexedRowMatrix = {
     val n = A.numCols().toInt
-    val B = A.toBlockMatrixDense().cache()
-    val G = B.transpose.multiply(B)
+    val B = A.toHailBlockMatrix().cache()
+    val G = B.t * B
     B.blocks.unpersist()
     G.toIndexedRowMatrix()
   }
@@ -30,7 +31,9 @@ object ComputeGramian {
 // diagonal values are approximately 1 assuming independent variants by Central Limit Theorem
 object ComputeRRM {
 
-  def apply(vds: VariantDataset, forceBlock: Boolean = false, forceGramian: Boolean = false): (IndexedRowMatrix, Long) = {
+  def apply(vds: MatrixTable, forceBlock: Boolean = false, forceGramian: Boolean = false): KinshipMatrix = {
+    info(s"rrm: Computing Realized Relationship Matrix...")
+
     def scaleMatrix(matrix: Matrix, scalar: Double): Matrix = {
       Matrices.dense(matrix.numRows, matrix.numCols, matrix.toArray.map(_ * scalar))
     }
@@ -55,7 +58,10 @@ object ComputeRRM {
 
     val mRec = 1d / rowCount
 
-    (new IndexedRowMatrix(computedGramian.rows.map(ir => IndexedRow(ir.index, ir.vector.map(_ * mRec)))), rowCount)
+    val rrm = new IndexedRowMatrix(computedGramian.rows.map(ir => IndexedRow(ir.index, ir.vector.map(_ * mRec))))
+
+    info(s"rrm: RRM computed using $rowCount variants.")
+    KinshipMatrix(vds.hc, vds.sSignature, rrm, vds.sampleIds.toArray, rowCount)
   }
 }
 
@@ -70,42 +76,92 @@ object LocalDenseMatrixToIndexedRowMatrix {
 
 // each row has mean 0, norm sqrt(n), variance 1, constant variants are dropped
 object ToNormalizedRowMatrix {
-  def apply(vds: VariantDataset): RowMatrix = {
-    require(vds.wasSplit)
+  def apply(vds: MatrixTable): RowMatrix = {
     val n = vds.nSamples
-    val rows = vds.rdd.flatMap { case (v, (va, gs)) => RegressionUtils.normalizedHardCalls(gs, n) }.map(Vectors.dense)
-    val m = rows.count()
-    new RowMatrix(rows, m, n)
+
+    val rowType = vds.rowType
+    val rows = vds.rdd2.mapPartitions { it =>
+      val view = HardCallView(rowType)
+
+      it.flatMap { rv =>
+        view.setRegion(rv)
+        RegressionUtils.normalizedHardCalls(view, n)
+          .map(Vectors.dense)
+      }
+    }.persist()
+
+    new RowMatrix(rows, rows.count(), n)
   }
 }
 
 // each row has mean 0, norm sqrt(n), variance 1
 object ToNormalizedIndexedRowMatrix {
-  def apply(vds: VariantDataset): IndexedRowMatrix = {
-    require(vds.wasSplit)
+  def apply(vds: MatrixTable): IndexedRowMatrix = {
     val n = vds.nSamples
-    val variants = vds.variants.collect()
-    val variantIdxBc = vds.sparkContext.broadcast(variants.index)
-    val indexedRows = vds.rdd.flatMap { case (v, (va, gs)) => RegressionUtils.normalizedHardCalls(gs, n).map(a => IndexedRow(variantIdxBc.value(v), Vectors.dense(a))) }
-    new IndexedRowMatrix(indexedRows, variants.size, n)
+
+    val partStarts = vds.partitionStarts()
+
+    assert(partStarts.length == vds.rdd2.getNumPartitions + 1)
+    val partStartsBc = vds.sparkContext.broadcast(partStarts)
+
+    val rowType = vds.rowType
+    val indexedRows = vds.rdd2.mapPartitionsWithIndex { case (i, it) =>
+      val view = HardCallView(rowType)
+
+      val start = partStartsBc.value(i)
+      var j = 0
+      it.flatMap { rv =>
+        view.setRegion(rv)
+        val row = RegressionUtils.normalizedHardCalls(view, n)
+          .map { a => IndexedRow(start + j, Vectors.dense(a)) }
+        j += 1
+        row
+      }
+    }.persist()
+
+    new IndexedRowMatrix(indexedRows, partStarts.last, n)
   }
 }
 
 // each row has mean 0, norm approx sqrt(n), variance approx 1, constant variants are included as zero vector
 object ToHWENormalizedIndexedRowMatrix {
-  def apply(vds: VariantDataset): (Array[Variant], IndexedRowMatrix) = {
-    require(vds.wasSplit)
+  def apply(vsm: MatrixTable): (Array[Variant], IndexedRowMatrix) = {
+    val rowType = vsm.rowType
 
-    val n = vds.nSamples
-    val variants = vds.variants.collect()
-    val variantIdxBc = vds.sparkContext.broadcast(variants.index)
+    val n = vsm.nSamples
+    // extra leading 0 from scanLeft
+    val variantsAndSizes = vsm.rdd2.mapPartitions { it =>
+      val tv = rowType.fields(1).typ.asInstanceOf[TVariant]
+      val ab = new ArrayBuilder[Variant]
+      var n = 0
+      it.foreach { rv =>
+        ab += Variant.fromRegionValue(rv.region, rowType.loadField(rv, 1))
+        n += 1
+      }
+      Iterator.single((n, ab.result()))
+    }.collect()
 
-    val mat = vds.rdd.map { case (v, (va, gs)) =>
-      IndexedRow(variantIdxBc.value(v), Vectors.dense(
-        RegressionUtils.normalizedHardCalls(gs, n, useHWE = true, variants.size).getOrElse(Array.ofDim[Double](n))))
-    }
+    val variants = variantsAndSizes.flatMap(_._2)
+    val nVariants = variants.length
 
-    (variants, new IndexedRowMatrix(mat.cache(), variants.size, n))
+    val partitionSizes = variantsAndSizes.map(_._1).scanLeft(0)(_ + _)
+    assert(partitionSizes.length == vsm.rdd2.getNumPartitions + 1)
+    val pSizeBc = vsm.sparkContext.broadcast(partitionSizes)
+
+    val indexedRows = vsm.rdd2.mapPartitionsWithIndex { case (i, it) =>
+      val view = HardCallView(rowType)
+
+      val partitionStartIndex = pSizeBc.value(i)
+      var indexInPartition = 0
+      it.flatMap { rv =>
+        view.setRegion(rv)
+        val row = RegressionUtils.normalizedHardCalls(view, n, useHWE = true, nVariants)
+          .map { a => IndexedRow(partitionStartIndex + indexInPartition, Vectors.dense(a)) }
+        indexInPartition += 1
+        row
+      }
+    }.persist()
+
+    (variants, new IndexedRowMatrix(indexedRows, nVariants, n))
   }
-
 }

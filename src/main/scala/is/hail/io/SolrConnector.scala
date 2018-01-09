@@ -2,10 +2,10 @@ package is.hail.io
 
 import java.util
 
-import is.hail.expr.{EvalContext, Parser, TBoolean, TDouble, TFloat, TGenotype, TInt, TIterable, TLong, TString, TVariant, Type}
-import is.hail.keytable.KeyTable
+import is.hail.expr._
+import is.hail.table.Table
 import is.hail.utils._
-import is.hail.variant.VariantDataset
+import is.hail.variant.MatrixTable
 import org.apache.solr.client.solrj.impl.{CloudSolrClient, HttpSolrClient}
 import org.apache.solr.client.solrj.request.CollectionAdminRequest
 import org.apache.solr.client.solrj.request.schema.SchemaRequest
@@ -19,12 +19,12 @@ import scala.util.Random
 object SolrConnector {
 
   def toSolrType(t: Type): String = t match {
-    case TInt => "int"
-    case TLong => "long"
-    case TFloat => "float"
-    case TDouble => "double"
-    case TBoolean => "boolean"
-    case TString => "string"
+    case _: TInt32 => "int"
+    case _: TInt64 => "long"
+    case _: TFloat32 => "float"
+    case _: TFloat64 => "double"
+    case _: TBoolean => "boolean"
+    case _: TString => "string"
     // FIXME only 1 deep
     case i: TIterable => toSolrType(i.elementType)
     // FIXME
@@ -97,7 +97,7 @@ object SolrConnector {
     cc
   }
 
-  def export(kt: KeyTable,
+  def export(kt: Table,
     zkHost: String,
     collection: String,
     blockSize: Int) {

@@ -2,7 +2,9 @@ package is.hail.stats
 
 import breeze.stats._
 import is.hail.SparkSuite
-import org.apache.spark.sql.catalyst.expressions.GenericRow
+import is.hail.variant.{Genotype, Locus, Variant}
+import is.hail.variant.{Call, Genotype}
+import org.apache.spark.sql.Row
 import org.testng.Assert.assertEquals
 import org.testng.annotations.Test
 
@@ -24,6 +26,9 @@ class BaldingNicholsModelSuite extends SparkSuite {
     assert(bnm1.rdd.collect().toSeq == bnm2.rdd.collect().toSeq)
     assert(bnm1.globalAnnotation == bnm2.globalAnnotation)
     assert(bnm1.sampleAnnotations == bnm2.sampleAnnotations)
+
+    bnm1.typecheck()
+    bnm2.typecheck()
   }
 
   @Test def testDimensions()  {
@@ -52,7 +57,7 @@ class BaldingNicholsModelSuite extends SparkSuite {
       val popDist: Array[Double] = popDistOpt.getOrElse(Array.fill(K)(1.0))
 
       //Test population distribution
-      val popArray = bnm.sampleAnnotations.toArray.map(_.asInstanceOf[GenericRow](0).toString.toDouble)
+      val popArray = bnm.sampleAnnotations.toArray.map(_.asInstanceOf[Row](0).toString.toDouble)
       val popCounts = popArray.groupBy(x => x).values.toSeq.sortBy(_(0)).map(_.size)
 
       popCounts.indices.foreach(index => {
@@ -60,7 +65,7 @@ class BaldingNicholsModelSuite extends SparkSuite {
       })
 
       //Test AF distributions
-      val arrayOfVARows = bnm.variantsAndAnnotations.collect().map(_._2).toSeq.asInstanceOf[mutable.WrappedArray[GenericRow]]
+      val arrayOfVARows = bnm.variantsAndAnnotations.collect().map(_._2).toSeq.asInstanceOf[mutable.WrappedArray[Row]]
       val arrayOfVATuples = arrayOfVARows.map(row => (row.get(0), row.get(1)).asInstanceOf[(Double, Vector[Double])])
 
       val AFStats = arrayOfVATuples.map(tuple => meanAndVariance(tuple._2))
@@ -72,9 +77,9 @@ class BaldingNicholsModelSuite extends SparkSuite {
       }
 
       //Test genotype distributions
-      val meanGeno_mk = bnm.rdd
+      val meanGeno_mk = bnm.typedRDD[Locus, Variant]
         .map(_._2._2.zip(popArray).groupBy(_._2).toSeq.sortBy(_._1))
-        .map(_.map(popIterPair => mean(popIterPair._2.map(_._1.gt.get.toDouble))).toArray)
+        .map(_.map(popIterPair => mean(popIterPair._2.map(x => x._1.asInstanceOf[Row].getAs[Call](0).toDouble))).toArray)
         .collect()
 
       val p_mk = arrayOfVATuples.map(_._2.toArray)
@@ -95,7 +100,7 @@ class BaldingNicholsModelSuite extends SparkSuite {
     def testRangeHelp(dist: Distribution, min: Double, max: Double, seed: Int) {
       val bnm = BaldingNicholsModel(hc, 3, 400, 400, None, None, seed, Some(4), dist)
 
-      val arrayOfVARows = bnm.variantsAndAnnotations.collect().map(_._2).toSeq.asInstanceOf[mutable.WrappedArray[GenericRow]]
+      val arrayOfVARows = bnm.variantsAndAnnotations.collect().map(_._2.asInstanceOf[Row]).toSeq
       val arrayOfAncestralAFs = arrayOfVARows.map(row => row.get(0).asInstanceOf[Double])
 
       assert(arrayOfAncestralAFs.forall(af => af > min && af < max))

@@ -3,7 +3,7 @@ package is.hail.utils
 import is.hail.SparkSuite
 import is.hail.check.Arbitrary._
 import is.hail.check.{Gen, Prop}
-import is.hail.sparkextras.OrderedRDD
+import is.hail.sparkextras.{BinarySearch, OrderedRDD}
 import is.hail.utils.richUtils.RichHadoopConfiguration
 import is.hail.variant._
 import org.apache.spark.storage.StorageLevel
@@ -104,8 +104,8 @@ class UtilsSuite extends SparkSuite {
   }
 
   @Test def testLeftJoinIterators() {
-    val g = for (uniqueInts <- Gen.buildableOf[Set, Int](Gen.choose(0, 1000)).map(set => set.toIndexedSeq.sorted);
-      toZip <- Gen.buildableOfN[IndexedSeq, String](uniqueInts.size, arbitrary[String])
+    val g = for (uniqueInts <- Gen.buildableOf[Set](Gen.choose(0, 1000)).map(set => set.toIndexedSeq.sorted);
+      toZip <- Gen.buildableOfN[IndexedSeq](uniqueInts.size, arbitrary[String])
     ) yield {
       uniqueInts.zip(toZip)
     }
@@ -125,12 +125,16 @@ class UtilsSuite extends SparkSuite {
   }
 
   @Test def testKeySortIterator() {
-    val g = for (chr <- Gen.oneOf("1", "2");
-      pos <- Gen.choose(1, 50);
-      ref <- genDNAString;
-      alt <- genDNAString.filter(_ != ref);
-      v <- arbitrary[Int]) yield (Variant(chr, pos, ref, alt), v)
-    val p = Prop.forAll(Gen.distinctBuildableOf[IndexedSeq, (Variant, Int)](g)) { indSeq =>
+    val g = for {
+      gr <- GenomeReference.gen
+      seq <- Gen.distinctBuildableOf[IndexedSeq](Gen.zip(VariantSubgen.fromGenomeRef(gr).gen, arbitrary[Int]))
+    } yield (gr, seq)
+
+    val p = Prop.forAll(g) { case (gr, indSeq) =>
+      implicit val variantOrd = gr.variantOrdering
+      implicit val locusOrd = gr.locusOrdering
+      implicit val ordKey = Variant.orderedKey(gr)
+
       val kSorted = indSeq.sortBy(_._1)
       val localKeySorted = OrderedRDD.localKeySort(indSeq.sortBy(_._1.locus).iterator).toIndexedSeq
 
@@ -157,38 +161,20 @@ class UtilsSuite extends SparkSuite {
   }
 
   @Test def sortedUnionIterator() {
+    val g = for {
+      gr <- GenomeReference.gen
+      v = VariantSubgen.fromGenomeRef(gr).gen
+      a1 <- Gen.buildableOf[Array](v)
+      a2 <- Gen.buildableOf[Array](v)
+    } yield (gr, a1, a2)
 
-    val p = Prop.forAll(Gen.buildableOf[Array, Variant](Variant.gen), Gen.buildableOf[Array, Variant](Variant.gen)) {
-      case (a1, a2) =>
+    val p = Prop.forAll(g) {
+      case (gr, a1, a2) =>
+        implicit val variantOrd = gr.variantOrdering
         val sa1 = a1.sorted.map(v => (v, "foo"))
         val sa2 = a2.sorted.map(v => (v, "foo"))
         (sa1 ++ sa2).sorted.sameElements(
           new SortedUnionPairIterator(sa1.iterator, sa2.iterator).toSeq)
-    }
-
-    p.check()
-  }
-
-  @Test def localVariantSortIterator() {
-    val vg = for {contig <- Gen.oneOf("1", "2")
-      start <- Gen.choose(1, 1000)
-      ref <- Gen.oneOf("A", "T", "C", "G")
-      alt <- Gen.oneOf("A", "T", "C", "G", "TT", "CCA").filter(_ != ref)
-    } yield Variant(contig, start, ref, alt)
-
-    val p = Prop.forAll(Gen.buildableOf[Seq, Variant](vg), Gen.choose(10, 300)) { case (variants, maxShift) =>
-      val adjusted = variants.groupBy(v => v.start / maxShift + v.contig.toInt * 10000)
-        .toSeq
-
-      val adjusted2 = adjusted.sortBy(_._1)
-        .flatMap(_._2)
-
-
-      val localSorted = LocalVariantSortIterator(adjusted2.map(v => (v, "foo")).iterator, maxShift)
-        .map(_._1)
-        .toArray
-
-      variants.sorted.sameElements(localSorted)
     }
 
     p.check()
@@ -274,9 +260,64 @@ class UtilsSuite extends SparkSuite {
   }
 
   @Test def testCollectAsSet() {
-    Prop.forAll(Gen.buildableOf[Array, Int](Gen.choose(-1000, 1000)), Gen.choose(1, 10)) { case (values, parts) =>
+    Prop.forAll(Gen.buildableOf[Array](Gen.choose(-1000, 1000)), Gen.choose(1, 10)) { case (values, parts) =>
       val rdd = sc.parallelize(values, numSlices = parts)
       rdd.collectAsSet() == rdd.collect().toSet
     }.check()
+  }
+
+  @Test def testDigitsNeeded() {
+    assert(digitsNeeded(0) == 1)
+    assert(digitsNeeded(1) == 1)
+    assert(digitsNeeded(7) == 1)
+    assert(digitsNeeded(9) == 1)
+    assert(digitsNeeded(13) == 2)
+    assert(digitsNeeded(30173) == 5)
+  }
+
+  @Test def testMangle() {
+    val c1 = Array("a", "b", "c", "a", "a", "c", "a")
+    val (c2, diff) = mangle(c1)
+    assert(c2.toSeq == Seq("a", "b", "c", "a_1", "a_2", "c_1", "a_3"))
+    assert(diff.toSeq == Seq("a" -> "a_1", "a" -> "a_2", "c" -> "c_1", "a" -> "a_3"))
+
+    val c3 = Array("a", "b", "c", "a", "a", "c", "a")
+    val (c4, diff2) = mangle(c1, "D" * _)
+    assert(c4.toSeq == Seq("a", "b", "c", "aD", "aDD", "cD", "aDDD"))
+    assert(diff2.toSeq == Seq("a" -> "aD", "a" -> "aDD", "c" -> "cD", "a" -> "aDDD"))
+  }
+
+  @Test def testBinarySearch() {
+    val g = for {
+      a <- Gen.buildableOf[Array](arbitrary[Int])
+      s = a.sorted
+      i <- Gen.choose(0, a.length - 1)
+      v <- arbitrary[Int]
+    } yield {
+      val length = s.length
+
+      var min = s(0)
+      if (min > Int.MinValue)
+        min -= 1
+      assert(BinarySearch.binarySearch(a.length, i => min.compare(s(i))) == 0)
+
+      var max = s.last
+      if (max < Int.MaxValue)
+        max += 1
+      var j = length - 1
+      while (j > 0 && s(j - 1) == max)
+        j -= 1
+      assert(BinarySearch.binarySearch(a.length, i => max.compare(s(i))) == j)
+
+      j = i
+      while (j > 0 && s(j - 1) == s(i))
+        j -= 1
+      assert(BinarySearch.binarySearch(a.length, i => s(j).compare(s(i))) == j)
+
+      BinarySearch.binarySearch(a.length, i => v.compare(s(i)))
+
+      true
+    }
+    Prop.forAll(g).check()
   }
 }

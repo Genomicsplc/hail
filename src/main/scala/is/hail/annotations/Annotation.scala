@@ -1,11 +1,9 @@
 package is.hail.annotations
 
 import is.hail.expr._
-import is.hail.utils.Interval
+import is.hail.utils.{ArrayBuilder, Interval}
 import is.hail.variant._
 import org.apache.spark.sql.Row
-
-import scala.collection.mutable
 
 object Annotation {
 
@@ -17,7 +15,7 @@ object Annotation {
 
   final val GENOTYPE_HEAD = "g"
 
-  def empty: Annotation = null
+  val empty: Annotation = Row()
 
   def emptyIndexedSeq(n: Int): IndexedSeq[Annotation] = Array.fill[Annotation](n)(Annotation.empty)
 
@@ -28,7 +26,7 @@ object Annotation {
       case r: Row =>
         "Struct:\n" +
           r.toSeq.zipWithIndex.map { case (elem, index) =>
-            s"""$spaces[$index] ${printAnnotation(elem, nSpace + 4)}"""
+            s"""$spaces[$index] ${ printAnnotation(elem, nSpace + 4) }"""
           }
             .mkString("\n")
       case a => a.toString + ": " + a.getClass.getSimpleName
@@ -36,24 +34,17 @@ object Annotation {
   }
 
   def expandType(t: Type): Type = t match {
-    case TVariant => Variant.expandedType
-    case TGenotype => Genotype.expandedType
-    case TLocus => Locus.expandedType
-    case TArray(elementType) =>
-      TArray(expandType(elementType))
-    case TStruct(fields) =>
-      TStruct(fields.map { f => f.copy(typ = expandType(f.typ)) })
-    case TSet(elementType) =>
-      TArray(expandType(elementType))
-    case TDict(keyType, valueType) =>
+    case tc: ComplexType => expandType(tc.representation)
+    case TArray(elementType, req) =>
+      TArray(expandType(elementType), req)
+    case TStruct(fields, req) =>
+      TStruct(fields.map { f => f.copy(typ = expandType(f.typ)) }, req)
+    case TSet(elementType, req) =>
+      TArray(expandType(elementType), req)
+    case TDict(keyType, valueType, req) =>
       TArray(TStruct(
         "key" -> expandType(keyType),
-        "value" -> expandType(valueType)))
-    case TAltAllele => AltAllele.expandedType
-    case TInterval =>
-      TStruct(
-        "start" -> Locus.expandedType,
-        "end" -> Locus.expandedType)
+        "value" -> expandType(valueType)), req)
     case _ => t
   }
 
@@ -62,31 +53,30 @@ object Annotation {
       null
     else
       t match {
-        case TVariant => a.asInstanceOf[Variant].toRow
-        case TGenotype => a.asInstanceOf[Genotype].toRow
-        case TLocus => a.asInstanceOf[Locus].toRow
+        case _: TVariant => a.asInstanceOf[Variant].toRow
+        case _: TLocus => a.asInstanceOf[Locus].toRow
 
-        case TArray(elementType) =>
+        case TArray(elementType, _) =>
           a.asInstanceOf[IndexedSeq[_]].map(expandAnnotation(_, elementType))
-        case TStruct(fields) =>
+        case TStruct(fields, _) =>
           Row.fromSeq((a.asInstanceOf[Row].toSeq, fields).zipped.map { case (ai, f) =>
             expandAnnotation(ai, f.typ)
           })
 
-        case TSet(elementType) =>
+        case TSet(elementType, _) =>
           (a.asInstanceOf[Set[_]]
-            .toArray[Any] : IndexedSeq[_])
+            .toArray[Any]: IndexedSeq[_])
             .map(expandAnnotation(_, elementType))
 
-        case TDict(keyType, valueType) =>
+        case TDict(keyType, valueType, _) =>
           (a.asInstanceOf[Map[String, _]]
 
             .toArray[(Any, Any)]: IndexedSeq[(Any, Any)])
             .map { case (k, v) => Annotation(expandAnnotation(k, keyType), expandAnnotation(v, valueType)) }
 
-        case TAltAllele => a.asInstanceOf[AltAllele].toRow
+        case _: TAltAllele => a.asInstanceOf[AltAllele].toRow
 
-        case TInterval =>
+        case _: TInterval =>
           val i = a.asInstanceOf[Interval[Locus]]
           Annotation(i.start.toRow,
             i.end.toRow)
@@ -140,7 +130,7 @@ object Annotation {
   def buildInserter(code: String, t: Type, ec: EvalContext, expectedHead: String): (Type, Inserter) = {
     val (paths, types, f) = Parser.parseAnnotationExprs(code, ec, Some(expectedHead))
 
-    val inserterBuilder = mutable.ArrayBuilder.make[Inserter]
+    val inserterBuilder = new ArrayBuilder[Inserter]()
     val finalType = (paths, types).zipped.foldLeft(t) { case (t, (ids, signature)) =>
       val (s, i) = t.insert(signature, ids)
       inserterBuilder += i
@@ -161,6 +151,29 @@ object Annotation {
     }
 
     (finalType, insF)
+  }
+
+  def copy(t: Type, a: Annotation): Annotation = {
+    if (a == null)
+      return null
+
+    t match {
+      case t: TStruct =>
+        val region = Region()
+        val rvb = new RegionValueBuilder(region)
+        rvb.start(t)
+        rvb.addAnnotation(t, a)
+        new UnsafeRow(t, region, rvb.end())
+
+      case t: TContainer =>
+        val region = Region()
+        val rvb = new RegionValueBuilder(region)
+        rvb.start(t)
+        rvb.addAnnotation(t, a)
+        new UnsafeIndexedSeq(t, region, rvb.end())
+
+      case _ => a
+    }
   }
 }
 

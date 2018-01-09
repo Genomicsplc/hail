@@ -1,34 +1,41 @@
 package is.hail
 
+import java.io.InputStream
 import java.util.Properties
 
-import is.hail.annotations.Annotation
+import is.hail.annotations._
 import is.hail.expr.{EvalContext, Parser, TStruct, Type, _}
+import is.hail.io.{Decoder, LZ4InputBuffer}
+import is.hail.io.LoadMatrix
 import is.hail.io.bgen.BgenLoader
-import is.hail.io.gen.{GenLoader, GenReport}
+import is.hail.io.gen.GenLoader
 import is.hail.io.plink.{FamFileConfig, PlinkLoader}
 import is.hail.io.vcf._
-import is.hail.keytable.KeyTable
-import is.hail.methods.DuplicateReport
+import is.hail.table.Table
+import is.hail.rvd.OrderedRVD
 import is.hail.stats.{BaldingNicholsModel, Distribution, UniformDist}
 import is.hail.utils.{log, _}
-import is.hail.variant.{GenericDataset, Genotype, VSMFileMetadata, VSMSubgen, Variant, VariantDataset, VariantSampleMatrix}
+import is.hail.variant.{GenomeReference, Genotype, HTSGenotypeView, Locus, VSMFileMetadata, VSMSubgen, Variant, MatrixTable}
+import org.apache.commons.lang3.StringUtils
 import org.apache.hadoop
-import org.apache.log4j.{LogManager, PropertyConfigurator}
-import org.apache.spark.deploy.SparkHadoopUtil
-import org.apache.spark.sql.{DataFrame, SQLContext}
-import org.apache.spark.{ProgressBarBuilder, SparkConf, SparkContext}
+import org.apache.log4j.{ConsoleAppender, LogManager, PatternLayout, PropertyConfigurator}
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.SQLContext
+import org.apache.spark._
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 import scala.language.existentials
+import scala.reflect.{ClassTag, classTag}
 
 object HailContext {
 
-  val tera = 1024L * 1024L * 1024L * 1024L
+  val tera: Long = 1024L * 1024L * 1024L * 1024L
 
-  def configureAndCreateSparkContext(appName: String, master: Option[String], local: String,
-    parquetCompression: String, blockSize: Long): SparkContext = {
+  val logFormat: String = "%d{yyyy-MM-dd HH:mm:ss} %c{1}: %p: %m%n"
+
+  def configureAndCreateSparkContext(appName: String, master: Option[String],
+    local: String, blockSize: Long): SparkContext = {
     require(blockSize >= 0)
     require(is.hail.HAIL_SPARK_VERSION == org.apache.spark.SPARK_VERSION,
       s"""This Hail JAR was compiled for Spark ${ is.hail.HAIL_SPARK_VERSION },
@@ -44,6 +51,7 @@ object HailContext {
           conf.setMaster(local)
     }
 
+    conf.set("spark.logConf", "true")
     conf.set("spark.ui.showConsoleProgress", "false")
 
     conf.set(
@@ -53,21 +61,9 @@ object HailContext {
         "org.apache.hadoop.io.compress.GzipCodec")
 
     conf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
-
-    conf.set("spark.sql.parquet.compression.codec", parquetCompression)
-    conf.set("spark.sql.files.openCostInBytes", tera.toString)
-    conf.set("spark.sql.files.maxPartitionBytes", tera.toString)
+    conf.set("spark.kryo.registrator", "is.hail.kryo.HailKryoRegistrator")
 
     conf.set("spark.hadoop.mapreduce.input.fileinputformat.split.minsize", (blockSize * 1024L * 1024L).toString)
-
-    /* `DataFrame.write` writes one file per partition.  Without this, read will split files larger than the default
-     * parquet block size into multiple partitions.  This causes `OrderedRDD` to fail since the per-partition range
-     * no longer line up with the RDD partitions.
-     *
-     * For reasons we don't understand, the DataFrame code uses `SparkHadoopUtil.get.conf` instead of the Hadoop
-     * configuration in the SparkContext.  Set both for consistency.
-     */
-    conf.set("spark.hadoop.parquet.block.size", tera.toString)
 
     // load additional Spark properties from HAIL_SPARK_PROPERTIES
     val hailSparkProperties = System.getenv("HAIL_SPARK_PROPERTIES")
@@ -94,15 +90,14 @@ object HailContext {
 
     val problems = new ArrayBuffer[String]
 
-    val enoughGigs = 1024L * 1024L * 1024L * 50
-    val sqlFileKeys = List("spark.sql.files.openCostInBytes",
-      "spark.sql.files.maxPartitionBytes")
+    val serializer = conf.get("spark.serializer")
+    val kryoSerializer = "org.apache.spark.serializer.KryoSerializer"
+    if (serializer != kryoSerializer)
+      problems += s"Invalid configuration property spark.serializer: required $kryoSerializer.  Found: $serializer."
 
-    sqlFileKeys.foreach { k =>
-      val param = conf.getLong(k, 0)
-      if (param < enoughGigs)
-        problems += s"Invalid config parameter '$k=': too small. Found $param, require at least 50G"
-    }
+    if (!conf.getOption("spark.kryo.registrator").exists(_.split(",").contains("is.hail.kryo.HailKryoRegistrator")))
+      problems += s"Invalid config parameter: spark.kryo.registrator must include is.hail.kryo.HailKryoRegistrator." +
+        s"Found ${ conf.getOption("spark.kryo.registrator").getOrElse("empty parameter.") }"
 
     if (problems.nonEmpty)
       fatal(
@@ -112,25 +107,20 @@ object HailContext {
 
   def configureLogging(logFile: String, quiet: Boolean, append: Boolean) {
     val logProps = new Properties()
-    if (quiet) {
-      logProps.put("log4j.rootLogger", "OFF, stderr")
-      logProps.put("log4j.appender.stderr", "org.apache.log4j.ConsoleAppender")
-      logProps.put("log4j.appender.stderr.Target", "System.err")
-      logProps.put("log4j.appender.stderr.threshold", "OFF")
-      logProps.put("log4j.appender.stderr.layout", "org.apache.log4j.PatternLayout")
-      logProps.put("log4j.appender.stderr.layout.ConversionPattern", "%d{yyyy-MM-dd HH:mm:ss} %-5p %c{1}:%L - %m%n")
-    } else {
-      logProps.put("log4j.rootLogger", "INFO, logfile")
-      logProps.put("log4j.appender.logfile", "org.apache.log4j.FileAppender")
-      logProps.put("log4j.appender.logfile.append", append.toString)
-      logProps.put("log4j.appender.logfile.file", logFile)
-      logProps.put("log4j.appender.logfile.threshold", "INFO")
-      logProps.put("log4j.appender.logfile.layout", "org.apache.log4j.PatternLayout")
-      logProps.put("log4j.appender.logfile.layout.ConversionPattern", "%d{yyyy-MM-dd HH:mm:ss} %-5p %c{1}:%L - %m%n")
-    }
+
+    logProps.put("log4j.rootLogger", "INFO, logfile")
+    logProps.put("log4j.appender.logfile", "org.apache.log4j.FileAppender")
+    logProps.put("log4j.appender.logfile.append", append.toString)
+    logProps.put("log4j.appender.logfile.file", logFile)
+    logProps.put("log4j.appender.logfile.threshold", "INFO")
+    logProps.put("log4j.appender.logfile.layout", "org.apache.log4j.PatternLayout")
+    logProps.put("log4j.appender.logfile.layout.ConversionPattern", HailContext.logFormat)
 
     LogManager.resetConfiguration()
     PropertyConfigurator.configure(logProps)
+
+    if (!quiet)
+      consoleLog.addAppender(new ConsoleAppender(new PatternLayout(HailContext.logFormat), "System.err"))
   }
 
   def apply(sc: SparkContext = null,
@@ -140,7 +130,6 @@ object HailContext {
     logFile: String = "hail.log",
     quiet: Boolean = false,
     append: Boolean = false,
-    parquetCompression: String = "snappy",
     minBlockSize: Long = 1L,
     branchingFactor: Int = 50,
     tmpDir: String = "/tmp"): HailContext = {
@@ -160,40 +149,53 @@ object HailContext {
     configureLogging(logFile, quiet, append)
 
     val sparkContext = if (sc == null)
-      configureAndCreateSparkContext(appName, master, local, parquetCompression, minBlockSize)
+      configureAndCreateSparkContext(appName, master, local, minBlockSize)
     else {
-      SparkHadoopUtil.get.conf.setLong("parquet.block.size", 1024L * 1024L * 1024L * 1024L)
       checkSparkConfiguration(sc)
       sc
     }
 
-    SparkHadoopUtil.get.conf.setLong("parquet.block.size", tera)
     sparkContext.hadoopConfiguration.set("io.compression.codecs",
       "org.apache.hadoop.io.compress.DefaultCodec," +
         "is.hail.io.compress.BGzipCodec," +
         "org.apache.hadoop.io.compress.GzipCodec"
     )
 
-    sparkContext.uiWebUrl.foreach(ui => info(s"SparkUI: $ui"))
     ProgressBarBuilder.build(sparkContext)
-
-    log.info(s"Spark properties: ${
-      sparkContext.getConf.getAll.map { case (k, v) =>
-        s"$k=$v"
-      }.mkString(", ")
-    }")
 
     val sqlContext = new org.apache.spark.sql.SQLContext(sparkContext)
     val hc = new HailContext(sparkContext, sqlContext, tmpDir, branchingFactor)
-    val welcomeMessage =
-      """Welcome to
-        |     __  __     <>__
-        |    / /_/ /__  __/ /
-        |   / __  / _ `/ / /
-        |  /_/ /_/\_,_/_/_/   version """.stripMargin + is.hail.HAIL_PRETTY_VERSION
-    println(welcomeMessage)
-    log.info(welcomeMessage)
+    sparkContext.uiWebUrl.foreach(ui => info(s"SparkUI: $ui"))
+
+    info(s"Running Hail version ${ hc.version }")
     hc
+  }
+
+  def readRowsPartition(t: TStruct)(i: Int, in: InputStream): Iterator[RegionValue] = {
+    new Iterator[RegionValue] {
+      val region = Region()
+      val rv = RegionValue(region)
+
+      val dec = new Decoder(new LZ4InputBuffer(in))
+
+      var cont: Byte = dec.readByte()
+
+      def hasNext: Boolean = cont != 0
+
+      def next(): RegionValue = {
+        if (!hasNext)
+          throw new NoSuchElementException("next on empty iterator")
+
+        region.clear()
+        rv.setOffset(dec.readRegionValue(t, region))
+
+        cont = dec.readByte()
+        if (cont == 0)
+          in.close()
+
+        rv
+      }
+    }
   }
 }
 
@@ -210,7 +212,7 @@ class HailContext private(val sc: SparkContext,
     sc.textFilesLines(hadoopConf.globAll(files))
       .filter(line => regexp.findFirstIn(line.value).isDefined)
       .take(maxLines)
-      .groupBy(_.source.asInstanceOf[TextContext].file)
+      .groupBy(_.source.asInstanceOf[Context].file)
       .foreach { case (file, lines) =>
         info(s"$file: ${ lines.length } ${ plural(lines.length, "match", "matches") }:")
         lines.map(_.value).foreach { line =>
@@ -224,14 +226,18 @@ class HailContext private(val sc: SparkContext,
   def importBgen(file: String,
     sampleFile: Option[String] = None,
     tolerance: Double = 0.2,
-    nPartitions: Option[Int] = None): VariantDataset = {
-    importBgens(List(file), sampleFile, tolerance, nPartitions)
+    nPartitions: Option[Int] = None,
+    gr: GenomeReference = GenomeReference.defaultReference,
+    contigRecoding: Option[Map[String, String]] = None): MatrixTable = {
+    importBgens(List(file), sampleFile, tolerance, nPartitions, gr, contigRecoding)
   }
 
   def importBgens(files: Seq[String],
     sampleFile: Option[String] = None,
     tolerance: Double = 0.2,
-    nPartitions: Option[Int] = None): VariantDataset = {
+    nPartitions: Option[Int] = None,
+    gr: GenomeReference = GenomeReference.defaultReference,
+    contigRecoding: Option[Map[String, String]] = None): MatrixTable = {
 
     val inputs = hadoopConf.globAll(files).flatMap { file =>
       if (!file.endsWith(".bgen"))
@@ -248,22 +254,28 @@ class HailContext private(val sc: SparkContext,
     if (inputs.isEmpty)
       fatal(s"arguments refer to no files: '${ files.mkString(",") }'")
 
-    BgenLoader.load(this, inputs, sampleFile, tolerance, nPartitions)
+    contigRecoding.foreach(gr.validateContigRemap)
+
+    BgenLoader.load(this, inputs, sampleFile, tolerance, nPartitions, gr, contigRecoding.getOrElse(Map.empty[String, String]))
   }
 
   def importGen(file: String,
     sampleFile: String,
     chromosome: Option[String] = None,
     nPartitions: Option[Int] = None,
-    tolerance: Double = 0.2): VariantDataset = {
-    importGens(List(file), sampleFile, chromosome, nPartitions, tolerance)
+    tolerance: Double = 0.2,
+    gr: GenomeReference = GenomeReference.defaultReference,
+    contigRecoding: Option[Map[String, String]] = None): MatrixTable = {
+    importGens(List(file), sampleFile, chromosome, nPartitions, tolerance, gr, contigRecoding)
   }
 
   def importGens(files: Seq[String],
     sampleFile: String,
     chromosome: Option[String] = None,
     nPartitions: Option[Int] = None,
-    tolerance: Double = 0.2): VariantDataset = {
+    tolerance: Double = 0.2,
+    gr: GenomeReference = GenomeReference.defaultReference,
+    contigRecoding: Option[Map[String, String]] = None): MatrixTable = {
     val inputs = hadoopConf.globAll(files)
 
     inputs.foreach { input =>
@@ -274,12 +286,14 @@ class HailContext private(val sc: SparkContext,
     if (inputs.isEmpty)
       fatal(s"arguments refer to no files: ${ files.mkString(",") }")
 
+    contigRecoding.foreach(gr.validateContigRemap)
+
     val samples = BgenLoader.readSampleFile(sc.hadoopConfiguration, sampleFile)
     val nSamples = samples.length
 
     //FIXME: can't specify multiple chromosomes
     val results = inputs.map(f => GenLoader(f, sampleFile, sc, nPartitions,
-      tolerance, chromosome))
+      tolerance, chromosome, contigRecoding.getOrElse(Map.empty[String, String])))
 
     val unequalSamples = results.filter(_.nSamples != nSamples).map(x => (x.file, x.nSamples))
     if (unequalSamples.length > 0)
@@ -299,11 +313,16 @@ class HailContext private(val sc: SparkContext,
     info(s"Number of variants in all GEN files: $nVariants")
     info(s"Number of samples in GEN files: $nSamples")
 
-    val signature = TStruct("rsid" -> TString, "varid" -> TString)
+    val signature = TStruct("rsid" -> TString(), "varid" -> TString())
 
-    new VariantSampleMatrix(this,
-      VSMFileMetadata(samples, vaSignature = signature, isLinearScale = true, wasSplit = true),
-      sc.union(results.map(_.rdd)).toOrderedRDD)
+    val rdd = sc.union(results.map(_.rdd))
+
+    MatrixTable.fromLegacy(this,
+      VSMFileMetadata(samples,
+        vaSignature = signature,
+        genotypeSignature = TStruct("GT" -> TCall(),
+          "GP" -> TArray(TFloat64()))),
+      rdd)
   }
 
   def importTable(inputs: java.util.ArrayList[String],
@@ -315,8 +334,9 @@ class HailContext private(val sc: SparkContext,
     missing: String,
     noHeader: Boolean,
     impute: Boolean,
-    quote: java.lang.Character): KeyTable = importTables(inputs.asScala, keyNames.asScala.toArray, if (nPartitions == null) None else Some(nPartitions),
-    types.asScala.toMap, Option(commentChar), separator, missing, noHeader, impute, quote)
+    quote: java.lang.Character,
+    gr: GenomeReference): Table = importTables(inputs.asScala, keyNames.asScala.toArray, if (nPartitions == null) None else Some(nPartitions),
+    types.asScala.toMap, Option(commentChar), separator, missing, noHeader, impute, quote, gr)
 
   def importTable(input: String,
     keyNames: Array[String] = Array.empty[String],
@@ -327,8 +347,9 @@ class HailContext private(val sc: SparkContext,
     missing: String = "NA",
     noHeader: Boolean = false,
     impute: Boolean = false,
-    quote: java.lang.Character = null): KeyTable = {
-    importTables(List(input), keyNames, nPartitions, types, commentChar, separator, missing, noHeader, impute, quote)
+    quote: java.lang.Character = null,
+    gr: GenomeReference = GenomeReference.defaultReference): Table = {
+    importTables(List(input), keyNames, nPartitions, types, commentChar, separator, missing, noHeader, impute, quote, gr)
   }
 
   def importTables(inputs: Seq[String],
@@ -340,7 +361,8 @@ class HailContext private(val sc: SparkContext,
     missing: String = "NA",
     noHeader: Boolean = false,
     impute: Boolean = false,
-    quote: java.lang.Character = null): KeyTable = {
+    quote: java.lang.Character = null,
+    gr: GenomeReference = GenomeReference.defaultReference): Table = {
     require(nPartitions.forall(_ > 0), "nPartitions argument must be positive")
 
     val files = hadoopConf.globAll(inputs)
@@ -349,154 +371,94 @@ class HailContext private(val sc: SparkContext,
 
     val (struct, rdd) =
       TextTableReader.read(sc)(files, types, commentChar, separator, missing,
-        noHeader, impute, nPartitions.getOrElse(sc.defaultMinPartitions), quote)
+        noHeader, impute, nPartitions.getOrElse(sc.defaultMinPartitions), quote, gr)
 
-    KeyTable(this, rdd.map(_.value), struct, keyNames)
+    Table(this, rdd.map(_.value), struct, keyNames)
   }
 
   def importPlink(bed: String, bim: String, fam: String,
     nPartitions: Option[Int] = None,
     delimiter: String = "\\\\s+",
     missing: String = "NA",
-    quantPheno: Boolean = false): VariantDataset = {
+    quantPheno: Boolean = false,
+    a2Reference: Boolean = true,
+    gr: GenomeReference = GenomeReference.defaultReference,
+    contigRecoding: Option[Map[String, String]] = None): MatrixTable = {
+
+    contigRecoding.foreach(gr.validateContigRemap)
 
     val ffConfig = FamFileConfig(quantPheno, delimiter, missing)
 
     PlinkLoader(this, bed, bim, fam,
-      ffConfig, nPartitions)
+      ffConfig, nPartitions, a2Reference, gr, contigRecoding.getOrElse(Map.empty[String, String]))
   }
 
   def importPlinkBFile(bfileRoot: String,
     nPartitions: Option[Int] = None,
     delimiter: String = "\\\\s+",
     missing: String = "NA",
-    quantPheno: Boolean = false): VariantDataset = {
+    quantPheno: Boolean = false,
+    a2Reference: Boolean = true,
+    gr: GenomeReference = GenomeReference.defaultReference,
+    contigRecoding: Option[Map[String, String]] = None): MatrixTable = {
     importPlink(bfileRoot + ".bed", bfileRoot + ".bim", bfileRoot + ".fam",
-      nPartitions, delimiter, missing, quantPheno)
+      nPartitions, delimiter, missing, quantPheno, a2Reference, gr, contigRecoding)
   }
 
-  def checkDatasetSchemasCompatible(datasets: Array[VariantSampleMatrix[_]], inputs: Array[String]) {
-    val sampleIds = datasets.head.sampleIds
-    val vaSchema = datasets.head.vaSignature
-    val wasSplit = datasets.head.wasSplit
-    val genotypeSchema = datasets.head.genotypeSignature
-    val isGenericGenotype = datasets.head.isGenericGenotype
-    val reference = inputs(0)
+  def read(file: String, dropSamples: Boolean = false, dropVariants: Boolean = false): MatrixTable = {
+    MatrixTable.read(this, file, dropSamples = dropSamples, dropVariants = dropVariants)
+  }
 
-    datasets.indices.tail.foreach { i =>
-      val vds = datasets(i)
-      val ids = vds.sampleIds
-      val vas = vds.vaSignature
-      val gsig = vds.genotypeSignature
-      val isGenGt = vds.isGenericGenotype
-      val path = inputs(i)
-      if (ids != sampleIds) {
-        fatal(
-          s"""cannot read datasets with different sample IDs or sample ordering
-             |  IDs in reference file $reference: @1
-             |  IDs in file $path: @2""".stripMargin, sampleIds, ids)
-      } else if (wasSplit != vds.wasSplit) {
-        fatal(
-          s"""cannot combine split and unsplit datasets
-             |  Reference file $reference split status: $wasSplit
-             |  File $path split status: ${ vds.wasSplit }""".stripMargin)
-      } else if (vas != vaSchema) {
-        fatal(
-          s"""cannot read datasets with different variant annotation schemata
-             |  Schema in reference file $reference: @1
-             |  Schema in file $path: @2""".stripMargin,
-          vaSchema.toPrettyString(compact = true, printAttrs = true),
-          vas.toPrettyString(compact = true, printAttrs = true)
-        )
-      } else if (gsig != genotypeSchema) {
-        fatal(
-          s"""cannot read datasets with different genotype schemata
-             |  Schema in reference file $reference: @1
-             |  Schema in file $path: @2""".stripMargin,
-          genotypeSchema.toPrettyString(compact = true, printAttrs = true),
-          gsig.toPrettyString(compact = true, printAttrs = true)
-        )
-      } else if (isGenGt != isGenericGenotype) {
-        fatal(
-          s"""cannot read datasets with different data formats
-             |  Generic genotypes in reference file $reference: @1
-             |  Generic genotypes in file $path: @2""".stripMargin,
-          isGenericGenotype.toString,
-          isGenGt.toString
-        )
+  def readVDS(file: String, dropSamples: Boolean = false, dropVariants: Boolean = false): MatrixTable =
+    read(file, dropSamples, dropVariants)
+
+  def readGDS(file: String, dropSamples: Boolean = false, dropVariants: Boolean = false): MatrixTable =
+    read(file, dropSamples, dropVariants)
+
+  def readTable(path: String): Table =
+    Table.read(this, path)
+
+  def readPartitions[T: ClassTag](
+    path: String,
+    nPartitions: Int,
+    read: (Int, InputStream) => Iterator[T],
+    optPartitioner: Option[Partitioner] = None): RDD[T] = {
+
+    val sHadoopConfBc = sc.broadcast(new SerializableHadoopConfiguration(sc.hadoopConfiguration))
+    val d = digitsNeeded(nPartitions)
+
+    new RDD[T](sc, Nil) {
+      def getPartitions: Array[Partition] =
+        Array.tabulate(nPartitions)(i =>
+          new Partition {
+            def index: Int = i
+          })
+
+      override def compute(split: Partition, context: TaskContext): Iterator[T] = {
+        val i = split.index
+        val is = i.toString
+        assert(is.length <= d)
+        val pis = StringUtils.leftPad(is, d, "0")
+
+        val filename = path + "/parts/part-" + pis
+        val in = sHadoopConfBc.value.value.unsafeReader(filename)
+
+        read(i, in)
       }
-    }
 
-    if (datasets.length > 1)
-      info(s"Using sample and global annotations from ${ inputs(0) }")
-  }
-
-  def read(file: String, dropSamples: Boolean = false, dropVariants: Boolean = false): VariantSampleMatrix[_] =
-    readAll(List(file), dropSamples, dropVariants)
-
-  def readAll(files: Seq[String], dropSamples: Boolean = false, dropVariants: Boolean = false): VariantSampleMatrix[_] = {
-    val inputs = hadoopConf.globAll(files)
-    if (inputs.isEmpty)
-      fatal(s"arguments refer to no files: '${ files.mkString(",") }'")
-
-    val vsms = inputs.map { input =>
-      VariantSampleMatrix.read(this, input, dropSamples = dropSamples, dropVariants = dropVariants)
-    }
-
-    if (vsms.length == 1)
-      return vsms(0)
-
-    checkDatasetSchemasCompatible(vsms, inputs)
-
-    // I can't figure out how to write this with existentials -cs
-    if (vsms(0).isGenericGenotype) {
-      val gdses = vsms.asInstanceOf[Array[GenericDataset]]
-      gdses(0).copy(
-        rdd = sc.union(gdses.map(_.rdd)).toOrderedRDD)
-    } else {
-      val vdses = vsms.asInstanceOf[Array[VariantDataset]]
-      vdses(0).copy(
-        rdd = sc.union(vdses.map(_.rdd)).toOrderedRDD)
+      @transient override val partitioner: Option[Partitioner] = optPartitioner
     }
   }
 
-  def readVDS(file: String, dropSamples: Boolean = false, dropVariants: Boolean = false): VariantDataset =
-    readVDSAll(List(file), dropSamples, dropVariants)
+  def readRows(path: String, t: TStruct, nPartitions: Int): RDD[RegionValue] =
+    readPartitions(path, nPartitions, HailContext.readRowsPartition(t))
 
-  def readVDSAll(files: Seq[String], dropSamples: Boolean = false, dropVariants: Boolean = false): VariantDataset = {
-    val vds = readAll(files, dropSamples, dropVariants)
-
-    if (vds.isGenericGenotype)
-      fatal("Cannot read datasets with generic genotypes as VDS.  Read as GDS.")
-    vds.asInstanceOf[VariantDataset]
-  }
-
-  def readGDS(file: String, dropSamples: Boolean = false, dropVariants: Boolean = false): GenericDataset =
-    readAllGDS(List(file), dropSamples, dropVariants)
-
-  def readAllGDS(files: Seq[String], dropSamples: Boolean = false, dropVariants: Boolean = false): GenericDataset = {
-    val vds = readAll(files, dropSamples, dropVariants)
-
-    if (!vds.isGenericGenotype)
-      fatal("Cannot read dataset without generic genotypes as GDS.  Read as VDS.")
-    vds.asInstanceOf[GenericDataset]
-  }
-
-  def readTable(path: String): KeyTable =
-    KeyTable.read(this, path)
-
-  /**
-    *
-    * @param path   path to Kudu database
-    * @param table  table name
-    * @param master Kudu master address
-    */
-  def readKudu(path: String, table: String, master: String): VariantDataset = {
-    VariantDataset.readKudu(this, path, table, master)
-  }
-
-  def writePartitioning(path: String) {
-    VariantSampleMatrix.writePartitioning(sqlContext, path)
+  def parseVCFMetadata(files: Seq[String]): Map[String, Map[String, Map[String, String]]] =
+    parseVCFMetadata(files.head)
+  
+  def parseVCFMetadata(file: String): Map[String, Map[String, Map[String, String]]] = {
+    val reader = new HtsjdkRecordReader(Set.empty)
+    LoadVCF.parseHeaderMetadata(this, reader, file)
   }
 
   def importVCF(file: String, force: Boolean = false,
@@ -504,11 +466,10 @@ class HailContext private(val sc: SparkContext,
     headerFile: Option[String] = None,
     nPartitions: Option[Int] = None,
     dropSamples: Boolean = false,
-    storeGQ: Boolean = false,
-    ppAsPL: Boolean = false,
-    skipBadAD: Boolean = false): VariantDataset = {
-    importVCFs(List(file), force, forceBGZ, headerFile, nPartitions, dropSamples,
-      storeGQ, ppAsPL, skipBadAD)
+    callFields: Set[String] = Set.empty[String],
+    gr: GenomeReference = GenomeReference.defaultReference,
+    contigRecoding: Option[Map[String, String]] = None): MatrixTable = {
+    importVCFs(List(file), force, forceBGZ, headerFile, nPartitions, dropSamples, callFields, gr, contigRecoding)
   }
 
   def importVCFs(files: Seq[String], force: Boolean = false,
@@ -516,61 +477,49 @@ class HailContext private(val sc: SparkContext,
     headerFile: Option[String] = None,
     nPartitions: Option[Int] = None,
     dropSamples: Boolean = false,
-    storeGQ: Boolean = false,
-    ppAsPL: Boolean = false,
-    skipBadAD: Boolean = false): VariantDataset = {
+    callFields: Set[String] = Set.empty[String],
+    gr: GenomeReference = GenomeReference.defaultReference,
+    contigRecoding: Option[Map[String, String]] = None): MatrixTable = {
+
+    contigRecoding.foreach(gr.validateContigRemap)
 
     val inputs = LoadVCF.globAllVCFs(hadoopConf.globAll(files), hadoopConf, force || forceBGZ)
-
-    val header = headerFile.getOrElse(inputs.head)
 
     val codecs = sc.hadoopConfiguration.get("io.compression.codecs")
 
     if (forceBGZ)
       hadoopConf.set("io.compression.codecs",
         codecs.replaceAllLiterally("org.apache.hadoop.io.compress.GzipCodec", "is.hail.io.compress.BGzipCodecGZ"))
-
-    val settings = VCFSettings(storeGQ, dropSamples, ppAsPL, skipBadAD)
-    val reader = new GenotypeRecordReader(settings)
-    val vds = LoadVCF(this, reader, header, inputs, nPartitions, dropSamples)
-
-    hadoopConf.set("io.compression.codecs", codecs)
-
-    vds
+    try {
+      val reader = new HtsjdkRecordReader(callFields)
+      LoadVCF(this, reader, headerFile, inputs, nPartitions, dropSamples, gr,
+        contigRecoding.getOrElse(Map.empty[String, String]))
+    } finally {
+      hadoopConf.set("io.compression.codecs", codecs)
+    }
   }
 
-  def importVCFGeneric(file: String, force: Boolean = false,
-    forceBGZ: Boolean = false,
-    headerFile: Option[String] = None,
+  def importMatrix(file: String,
+    annotationHeaders: Option[Seq[String]],
+    annotationTypes: Seq[Type],
+    keyExpr: String,
     nPartitions: Option[Int] = None,
     dropSamples: Boolean = false,
-    callFields: Set[String] = Set.empty[String]): GenericDataset = {
-    importVCFsGeneric(List(file), force, forceBGZ, headerFile, nPartitions, dropSamples, callFields)
-  }
+    cellType: Type = TInt64(),
+    missingVal: String = "NA"): MatrixTable =
+    importMatrices(List(file), annotationHeaders, annotationTypes, keyExpr, nPartitions, dropSamples, cellType, missingVal)
 
-  def importVCFsGeneric(files: Seq[String], force: Boolean = false,
-    forceBGZ: Boolean = false,
-    headerFile: Option[String] = None,
+  def importMatrices(files: Seq[String],
+    annotationHeaders: Option[Seq[String]],
+    annotationTypes: Seq[Type],
+    keyExpr: String,
     nPartitions: Option[Int] = None,
     dropSamples: Boolean = false,
-    callFields: Set[String] = Set.empty[String]): GenericDataset = {
+    cellType: Type = TInt64(),
+    missingVal: String = "NA"): MatrixTable = {
+    val inputs = hadoopConf.globAll(files)
 
-    val inputs = LoadVCF.globAllVCFs(hadoopConf.globAll(files), hadoopConf, force || forceBGZ)
-
-    val header = headerFile.getOrElse(inputs.head)
-
-    val codecs = sc.hadoopConfiguration.get("io.compression.codecs")
-
-    if (forceBGZ)
-      hadoopConf.set("io.compression.codecs",
-        codecs.replaceAllLiterally("org.apache.hadoop.io.compress.GzipCodec", "is.hail.io.compress.BGzipCodecGZ"))
-
-    val reader = new GenericRecordReader(callFields)
-    val gds = LoadVCF(this, reader, header, inputs, nPartitions, dropSamples)
-
-    hadoopConf.set("io.compression.codecs", codecs)
-
-    gds
+    LoadMatrix(this, inputs, annotationHeaders, annotationTypes, keyExpr, nPartitions = nPartitions, dropSamples = dropSamples, cellType = cellType, missingValue = missingVal)
   }
 
   def indexBgen(file: String) {
@@ -609,39 +558,40 @@ class HailContext private(val sc: SparkContext,
     popDist: Option[Array[Double]] = None,
     fst: Option[Array[Double]] = None,
     afDist: Distribution = UniformDist(0.1, 0.9),
-    seed: Int = 0): VariantDataset =
-    BaldingNicholsModel(this, populations, samples, variants, popDist, fst, seed, nPartitions, afDist)
+    seed: Int = 0,
+    gr: GenomeReference = GenomeReference.defaultReference): MatrixTable =
+    BaldingNicholsModel(this, populations, samples, variants, popDist, fst, seed, nPartitions, afDist, gr)
 
-  def genDataset(): VariantDataset = VSMSubgen.realistic.gen(this).sample()
+  def genDataset(): MatrixTable = VSMSubgen.realistic.gen(this).sample()
 
   def eval(expr: String): (Annotation, Type) = {
     val ec = EvalContext(
-      "v" -> TVariant,
-      "s" -> TString,
-      "g" -> TGenotype,
+      "v" -> TVariant(GenomeReference.GRCh37),
+      "s" -> TString(),
+      "g" -> Genotype.htsGenotypeType,
       "sa" -> TStruct(
-        "cohort" -> TString,
+        "cohort" -> TString(),
         "covariates" -> TStruct(
-          "PC1" -> TDouble,
-          "PC2" -> TDouble,
-          "PC3" -> TDouble,
-          "age" -> TInt,
-          "isFemale" -> TBoolean
+          "PC1" -> TFloat64(),
+          "PC2" -> TFloat64(),
+          "PC3" -> TFloat64(),
+          "age" -> TInt32(),
+          "isFemale" -> TBoolean()
         )),
       "va" -> TStruct(
         "info" -> TStruct(
-          "AC" -> TArray(TInt),
-          "AN" -> TInt,
-          "AF" -> TArray(TDouble)),
+          "AC" -> TArray(TInt32()),
+          "AN" -> TInt32(),
+          "AF" -> TArray(TFloat64())),
         "transcripts" -> TArray(TStruct(
-          "gene" -> TString,
-          "isoform" -> TString,
-          "canonical" -> TBoolean,
-          "consequence" -> TString))))
+          "gene" -> TString(),
+          "isoform" -> TString(),
+          "canonical" -> TBoolean(),
+          "consequence" -> TString()))))
 
     val v = Variant("16", 19200405, "C", Array("G", "CCC"))
     val s = "NA12878"
-    val g = Genotype(3, 1, Array(14, 0, 12), 26, 60, Array(60, 65, 126, 0, 67, 65))
+    val g = Genotype(1, Array(14, 0, 12), 26, 60, Array(60, 65, 126, 0, 67, 65))
     val sa = Annotation("1KG", Annotation(0.102312, -0.61512, 0.3166666, 34, true))
     val va = Annotation(
       Annotation(IndexedSeq(40, 1), 5102, IndexedSeq(0.00784, 0.000196)),
@@ -662,12 +612,6 @@ class HailContext private(val sc: SparkContext,
 
     val (t, f) = Parser.parseExpr(expr, ec)
     (f(), t)
-  }
-
-  def report() {
-    VCFReport.report()
-    GenReport.report()
-    DuplicateReport.report()
   }
 
   def stop() {

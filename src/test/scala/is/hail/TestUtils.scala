@@ -1,9 +1,10 @@
 package is.hail
 
 import breeze.linalg.{DenseMatrix, Matrix, Vector}
-import is.hail.keytable.KeyTable
+import is.hail.table.Table
 import is.hail.utils._
-import is.hail.variant.VariantDataset
+import is.hail.variant.{Genotype, Locus, Variant, MatrixTable}
+import org.apache.spark.SparkException
 import org.apache.spark.sql.Row
 
 object TestUtils {
@@ -19,7 +20,27 @@ object TestUtils {
            |  Found: ${thrown.getMessage} """.stripMargin)
     assert(p)
   }
-
+  
+  def interceptSpark(regex: String)(f: => Any) {
+    val thrown = intercept[SparkException](f)
+    val p = regex.r.findFirstIn(thrown.getMessage).isDefined
+    if (!p)
+      println(
+        s"""expected fatal exception with pattern `$regex'
+           |  Found: ${thrown.getMessage} """.stripMargin)
+    assert(p)
+  }
+  
+  def interceptAssertion(regex: String)(f: => Any) {
+    val thrown = intercept[AssertionError](f)
+    val p = regex.r.findFirstIn(thrown.getMessage).isDefined
+    if (!p)
+      println(
+        s"""expected assertion error with pattern `$regex'
+           |  Found: ${thrown.getMessage} """.stripMargin)
+    assert(p)
+  }
+  
   def assertVectorEqualityDouble(A: Vector[Double], B: Vector[Double], tolerance: Double = utils.defaultTolerance) {
     assert(A.size == B.size)
     assert((0 until A.size).forall(i => D_==(A(i), B(i), tolerance)))
@@ -50,18 +71,18 @@ object TestUtils {
   }
 
   // missing is -1
-  def vdsToMatrixInt(vds: VariantDataset): DenseMatrix[Int] =
+  def vdsToMatrixInt(vds: MatrixTable): DenseMatrix[Int] =
     new DenseMatrix[Int](
       vds.nSamples,
-      vds.countVariants.toInt,
-      vds.rdd.map(_._2._2.map(_.unboxedGT)).collect().flatten)
+      vds.countVariants().toInt,
+      vds.typedRDD[Locus, Variant].map(_._2._2.map(g => Genotype.unboxedGT(g))).collect().flatten)
 
   // missing is Double.NaN
-  def vdsToMatrixDouble(vds: VariantDataset): DenseMatrix[Double] =
+  def vdsToMatrixDouble(vds: MatrixTable): DenseMatrix[Double] =
     new DenseMatrix[Double](
       vds.nSamples,
-      vds.countVariants.toInt,
-      vds.rdd.map(_._2._2.map(_.gt.map(_.toDouble).getOrElse(Double.NaN))).collect().flatten)
+      vds.countVariants().toInt,
+      vds.rdd.map(_._2._2.map(x => Some(Genotype.unboxedGT(x)).filter(_ != -1).map(_.toDouble).getOrElse(Double.NaN))).collect().flatten)
 
   def indexedSeqBoxedDoubleEquals(tol: Double)
     (xs: IndexedSeq[java.lang.Double], ys: IndexedSeq[java.lang.Double]): Boolean =
@@ -72,9 +93,25 @@ object TestUtils {
         D_==(x.doubleValue(), y.doubleValue(), tolerance = tol)
     }
 
-  def keyTableBoxedDoubleToMap[T](kt: KeyTable): Map[T, IndexedSeq[java.lang.Double]] =
+  def keyTableBoxedDoubleToMap[T](kt: Table): Map[T, IndexedSeq[java.lang.Double]] =
     kt.collect().map { r =>
       val s = r.asInstanceOf[Row].toSeq
       s.head.asInstanceOf[T] -> s.tail.map(_.asInstanceOf[java.lang.Double]).toIndexedSeq
     }.toMap
+  
+  def matrixToString(A: DenseMatrix[Double], separator: String): String = {
+    val sb = new StringBuilder
+    for (i <- 0 until A.rows) {
+      for (j <- 0 until A.cols) {
+        if (j == (A.cols - 1))
+          sb.append(A(i, j))
+        else {
+          sb.append(A(i, j))
+          sb.append(separator)
+        }
+      }
+      sb += '\n'
+    }
+    sb.result()
+  }
 }

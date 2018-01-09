@@ -7,11 +7,15 @@ __all__ = ['typecheck',
            'nullable',
            'listof',
            'tupleof',
+           'sized_tupleof',
            'dictof',
+           'setof',
            'oneof',
            'strlike',
            'integral',
            'numeric',
-           'char']
-
-
+           'char',
+           'lazy',
+           'enumeration',
+           'identity',
+           'transformed']

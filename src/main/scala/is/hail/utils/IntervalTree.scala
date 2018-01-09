@@ -23,7 +23,7 @@ case class Interval[T](start: T, end: T)(implicit ev: Ordering[T]) extends Order
   def isEmpty: Boolean = start == end
 
   def compare(that: Interval[T]): Int = {
-    var c = ev.compare(start, that.start)
+    val c = ev.compare(start, that.start)
     if (c != 0)
       return c
 
@@ -36,10 +36,6 @@ case class Interval[T](start: T, end: T)(implicit ev: Ordering[T]) extends Order
 }
 
 object Interval {
-  implicit def intervalOrder[T](ev: Ordering[T]): Ordering[Interval[T]] = new Ordering[Interval[T]] {
-    def compare(x: Interval[T], y: Interval[T]): Int = x.compare(y)
-  }
-
   def gen[T: Ordering](tgen: Gen[T]): Gen[Interval[T]] =
     Gen.zip(tgen, tgen)
       .filter { case (x, y) => x != y }
@@ -52,8 +48,7 @@ object Interval {
 }
 
 case class IntervalTree[T: Ordering, U: ClassTag](root: Option[IntervalTreeNode[T, U]]) extends
-  Traversable[Interval[T]] with
-  Serializable {
+  Traversable[(Interval[T], U)] with Serializable {
   def contains(position: T): Boolean = root.exists(_.contains(position))
 
   def overlaps(interval: Interval[T]): Boolean = root.exists(_.overlaps(interval))
@@ -70,7 +65,7 @@ case class IntervalTree[T: Ordering, U: ClassTag](root: Option[IntervalTreeNode[
     b.result()
   }
 
-  def foreach[V](f: (Interval[T]) => V) {
+  def foreach[V](f: ((Interval[T], U)) => V) {
     root.foreach(_.foreach(f))
   }
 }
@@ -128,14 +123,14 @@ object IntervalTree {
   }
 
   def gen[T: Ordering](tgen: Gen[T]): Gen[IntervalTree[T, Unit]] = {
-    Gen.buildableOf[Array, Interval[T]](Interval.gen(tgen)).map(IntervalTree.apply(_))
+    Gen.buildableOf[Array](Interval.gen(tgen)).map(IntervalTree.apply(_))
   }
 }
 
 case class IntervalTreeNode[T: Ordering, U](i: Interval[T],
   left: Option[IntervalTreeNode[T, U]],
   right: Option[IntervalTreeNode[T, U]],
-  maximum: T, value: U) extends Traversable[Interval[T]] {
+  maximum: T, value: U) extends Traversable[(Interval[T], U)] {
 
   def contains(position: T): Boolean = {
     position <= maximum &&
@@ -172,9 +167,9 @@ case class IntervalTreeNode[T: Ordering, U](i: Interval[T],
     }
   }
 
-  def foreach[U](f: (Interval[T]) => U) {
+  def foreach[V](f: ((Interval[T], U)) => V) {
     left.foreach(_.foreach(f))
-    f(i)
+    f((i, value))
     right.foreach(_.foreach(f))
   }
 }

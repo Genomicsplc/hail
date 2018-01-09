@@ -1,13 +1,13 @@
 package is.hail.methods
 
 import is.hail.expr._
-import is.hail.keytable.KeyTable
+import is.hail.table.Table
 import is.hail.utils._
 import is.hail.variant._
 import org.apache.spark.sql.Row
 
 object ConcordanceCombiner {
-  val schema = TArray(TArray(TLong))
+  val schema = TArray(TArray(TInt64()))
 }
 
 class ConcordanceCombiner extends Serializable {
@@ -66,11 +66,15 @@ class ConcordanceCombiner extends Serializable {
 
 object CalculateConcordance {
 
-  def apply(left: VariantDataset, right: VariantDataset): (IndexedSeq[IndexedSeq[Long]], KeyTable, KeyTable) = {
-    require(left.wasSplit && right.wasSplit, "passed unsplit dataset to Concordance")
+  def apply(left: MatrixTable, right: MatrixTable): (IndexedSeq[IndexedSeq[Long]], Table, Table) = {
     val overlap = left.sampleIds.toSet.intersect(right.sampleIds.toSet)
     if (overlap.isEmpty)
       fatal("No overlapping samples between datasets")
+
+    if (left.vSignature != right.vSignature)
+      fatal(s"""Cannot compute concordance for datasets with different reference genomes:
+              |  left: ${left.vSignature.toPrettyString(compact = true)}
+              |  right: ${right.vSignature.toPrettyString(compact = true)}""")
 
     info(
       s"""Found ${ overlap.size } overlapping samples
@@ -81,14 +85,14 @@ object CalculateConcordance {
     val rightFiltered = right.filterSamples { case (s, _) => overlap(s) }
 
     val sampleSchema = TStruct(
-      "s" -> TString,
-      "nDiscordant" -> TLong,
+      "s" -> TString(),
+      "nDiscordant" -> TInt64(),
       "concordance" -> ConcordanceCombiner.schema
     )
 
     val variantSchema = TStruct(
-      "v" -> TVariant,
-      "nDiscordant" -> TLong,
+      "v" -> left.vSignature,
+      "nDiscordant" -> TInt64(),
       "concordance" -> ConcordanceCombiner.schema
     )
 
@@ -101,7 +105,7 @@ object CalculateConcordance {
     val rightIdMapping = rightIds.map(leftIdIndex).toArray
     val rightIdMappingBc = left.sparkContext.broadcast(rightIdMapping)
 
-    val join = leftFiltered.rdd.orderedOuterJoinDistinct(rightFiltered.rdd)
+    val join = leftFiltered.typedRDD[Locus, Variant].orderedOuterJoinDistinct(rightFiltered.typedRDD[Locus, Variant])
 
     val nSamples = leftIds.length
     val sampleResults = join.mapPartitions { it =>
@@ -115,26 +119,26 @@ object CalculateConcordance {
           case (Some((_, leftGS)), Some((_, rightGS))) =>
             var i = 0
             rightGS.foreach { g =>
-              arr(rightMapping(i)) = g.unboxedGT
+              arr(rightMapping(i)) = Genotype.unboxedGT(g)
               i += 1
             }
             assert(i == nSamples)
             i = 0
             leftGS.foreach { g =>
-              comb(i).mergeBoth(g.unboxedGT, arr(i))
+              comb(i).mergeBoth(Genotype.unboxedGT(g), arr(i))
               i += 1
             }
           case (None, Some((_, rightGS))) =>
             var i = 0
             rightGS.foreach { g =>
-              comb(rightMapping(i)).mergeRight(g.unboxedGT)
+              comb(rightMapping(i)).mergeRight(Genotype.unboxedGT(g))
               i += 1
             }
             assert(i == nSamples)
           case (Some((_, leftGS)), None) =>
             var i = 0
             leftGS.foreach { g =>
-              comb(i).mergeLeft(g.unboxedGT)
+              comb(i).mergeLeft(Genotype.unboxedGT(g))
               i += 1
             }
         }
@@ -156,21 +160,21 @@ object CalculateConcordance {
           case (Some((_, leftGS)), Some((_, rightGS))) =>
             var i = 0
             rightGS.foreach { g =>
-              arr(rightMapping(i)) = g.unboxedGT
+              arr(rightMapping(i)) = Genotype.unboxedGT(g)
               i += 1
             }
             assert(i == nSamples)
             i = 0
             leftGS.foreach { g =>
-              comb.mergeBoth(g.unboxedGT, arr(i))
+              comb.mergeBoth(Genotype.unboxedGT(g), arr(i))
               i += 1
             }
           case (None, Some((_, gs2))) =>
             gs2.foreach { g =>
-              comb.mergeRight(g.unboxedGT)
+              comb.mergeRight(Genotype.unboxedGT(g))
             }
           case (Some((_, gs1)), None) =>
-            gs1.foreach { g => comb.mergeLeft(g.unboxedGT) }
+            gs1.foreach { g => comb.mergeLeft(Genotype.unboxedGT(g)) }
         }
         val r = Row(v, comb.nDiscordant, comb.toAnnotation)
         assert(variantSchema.typeCheck(r))
@@ -186,9 +190,9 @@ object CalculateConcordance {
     val sampleRDD = left.hc.sc.parallelize(leftFiltered.sampleIds.zip(sampleResults)
       .map { case (id, comb) => Row(id, comb.nDiscordant, comb.toAnnotation) })
 
-    val sampleKT = KeyTable(left.hc, sampleRDD, sampleSchema, Array("s"))
+    val sampleKT = Table(left.hc, sampleRDD, sampleSchema, Array("s"))
 
-    val variantKT = KeyTable(left.hc, variantRDD, variantSchema, Array("v"))
+    val variantKT = Table(left.hc, variantRDD, variantSchema, Array("v"))
 
     (global.toAnnotation, sampleKT, variantKT)
   }

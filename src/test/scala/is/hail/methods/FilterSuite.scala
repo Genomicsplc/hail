@@ -4,16 +4,13 @@ import is.hail.annotations.Annotation
 import is.hail.expr._
 import is.hail.io.annotators.IntervalList
 import is.hail.utils._
-import is.hail.utils.TestRDDBuilder
+import is.hail.testUtils._
 import is.hail.{SparkSuite, TestUtils}
 import org.testng.annotations.Test
 
 class FilterSuite extends SparkSuite {
-
   @Test def filterTest() {
-
-    val vds = hc.importVCF("src/test/resources/sample.vcf")
-      .splitMulti()
+    val vds = SplitMulti(hc.importVCF("src/test/resources/sample.vcf"))
 
     assert(vds.filterSamplesExpr("\"^HG\" ~ s").nSamples == 63)
 
@@ -35,16 +32,16 @@ class FilterSuite extends SparkSuite {
 
     assert(vds.filterVariantsExpr("""va.rsid == "."""", keep = false).countVariants() == 258)
 
-    val sQcVds = vds.sampleQC()
+    val sQcVds = SampleQC(vds)
 
     assert(sQcVds.filterSamplesExpr("sa.qc.nCalled == 337").nSamples == 17)
 
-    assert(sQcVds.filterSamplesExpr("sa.qc.dpMean > 60").nSamples == 7)
+    assert(sQcVds.filterSamplesExpr("sa.qc.dpMean > 60").nSamples == 6)
 
     assert(sQcVds.filterSamplesExpr("if (\"^C1048\" ~ s) {sa.qc.rTiTv > 3.5 && sa.qc.nSingleton < 10000000} else sa.qc.rTiTv > 3")
       .nSamples == 16)
 
-    val vQcVds = vds.variantQC()
+    val vQcVds = VariantQC(vds)
 
     assert(vQcVds.filterVariantsExpr("va.qc.nCalled < 100").countVariants() == 36)
 
@@ -58,52 +55,44 @@ class FilterSuite extends SparkSuite {
 
     assert(vQcVds.filterVariantsExpr("isDefined(va.qc.rHetHomVar)").countVariants() == 117)
 
-    val highGQ = vds.filterGenotypes("g.gq < 20", keep = false)
+    val highGQ = vds.filterGenotypes("g.GQ < 20", keep = false)
+    assert(!highGQ.genotypeKT().exists("g.GQ < 20"))
+    assert(highGQ.genotypeKT().count() == 30889)
+
+    val highGQorMidQGAndLowFS = vds.filterGenotypes("g.GQ < 20 || (g.GQ < 30 && va.info.FS > 30)", keep = false)
       .expand()
       .collect()
 
-    assert(!highGQ.exists { case (v, s, g) => g.gq.exists(_ < 20) })
-    assert(highGQ.count { case (v, s, g) => g.gq.exists(_ >= 20) } == 30889)
-
-    val highGQorMidQGAndLowFS = vds.filterGenotypes("g.gq < 20 || (g.gq < 30 && va.info.FS > 30)", keep = false)
-      .expand()
-      .collect()
-
-    val vds2 = hc.importVCF("src/test/resources/filter.vcf")
+    val vds2 = SplitMulti(hc.importVCF("src/test/resources/filter.vcf"))
       .cache()
-      .splitMulti()
 
-    assert(vds2.filterGenotypes("g.ad[0] < 30").expand().collect().count(_._3.isCalled) == 3)
+    assert(vds2.filterGenotypes("g.AD[0] < 30").genotypeKT().count() == 3)
 
-    assert(vds2.filterGenotypes("g.ad[1].toDouble() / g.dp > 0.05").expand().collect().count(_._3.isCalled) == 3)
+    assert(vds2.filterGenotypes("g.AD[1].toFloat64() / g.DP > 0.05")
+        .genotypeKT()
+        .count() == 3)
 
-    val highGQ2 = vds2.filterGenotypes("g.gq < 20", keep = false)
+    val highGQ2 = vds2.filterGenotypes("g.GQ < 20", keep = false)
 
-    assert(!highGQ2.expand().collect().exists { case (v, s, g) => g.gq.exists(_ < 20) })
+    assert(!highGQ2.genotypeKT().exists("g.GQ < 20"))
 
     val chr1 = vds2.filterVariantsExpr("v.contig == \"1\"")
 
-    assert(chr1.rdd.count == 9)
+    assert(chr1.countVariants() == 9)
+    assert(chr1.filterGenotypes("isDefined(g.GT)").genotypeKT().count() == 9 * 11 - 2)
 
-    assert(chr1.expand().collect().count(_._3.isCalled) == 9 * 11 - 2)
+    val hetOrHomVarOnChr1 = chr1.filterGenotypes("g.GT.isHomRef()", keep = false)
 
-    val hetOrHomVarOnChr1 = chr1.filterGenotypes("g.isHomRef()", keep = false)
-      .expand()
-      .collect()
+    assert(hetOrHomVarOnChr1.filterGenotypes("isDefined(g.GT)").genotypeKT().count() == 9 + 3 + 3) // remove does not retain the 2 missing genotypes
 
-    assert(hetOrHomVarOnChr1.count(_._3.isCalled) == 9 + 3 + 3) // remove does not retain the 2 missing genotypes
+    val homRefOnChr1 = chr1.filterGenotypes("g.GT.isHomRef()")
 
-    val homRefOnChr1 = chr1.filterGenotypes("g.isHomRef()")
-      .expand()
-      .collect()
-
-    assert(homRefOnChr1.count(_._3.isCalled) == 9 * 11 - (9 + 3 + 3) - 2) // keep does not retain the 2 missing genotypes
+    assert(homRefOnChr1.genotypeKT().count() == 9 * 11 - (9 + 3 + 3) - 2) // keep does not retain the 2 missing genotypes
   }
 
   @Test def filterFromFileTest() {
 
-    val vds = TestRDDBuilder.buildRDD(8, 8, hc)
-      .splitMulti()
+    val vds = SplitMulti(TestRDDBuilder.buildRDD(8, 8, hc))
 
     val sampleList = hadoopConf.readLines("src/test/resources/filter.sample_list")(_.map(_.value: Annotation).toSet)
     assert(vds.filterSamplesList(sampleList).nSamples == 3)
@@ -118,17 +107,14 @@ class FilterSuite extends SparkSuite {
   }
 
   @Test def filterRegexTest() {
-    val vds = hc.importVCF("src/test/resources/multipleChromosomes.vcf")
-      .splitMulti()
+    val vds = SplitMulti(hc.importVCF("src/test/resources/multipleChromosomes.vcf"))
     val vds2 = vds.filterVariantsExpr(""" "^\\d+$" ~ v.contig """)
     assert(vds.countVariants() == vds2.countVariants())
   }
 
   @Test def MissingTest() {
-    val vds = hc.importVCF("src/test/resources/sample.vcf")
-      .splitMulti()
-    val keepOneSample = vds.filterSamplesExpr("s == \"C1046::HG02024\"")
-      .variantQC()
+    val vds = SplitMulti(hc.importVCF("src/test/resources/sample.vcf"))
+    val keepOneSample = VariantQC(vds.filterSamplesExpr("s == \"C1046::HG02024\""))
 
     val q = keepOneSample.queryVA("va.qc.rHetHomVar")._2
     val missingVariants = keepOneSample.variantsAndAnnotations
@@ -151,24 +137,12 @@ class FilterSuite extends SparkSuite {
 
   @Test def testWeirdNames() {
     var vds = hc.importVCF("src/test/resources/sample.vcf")
-    val (sigs, i) = vds.insertVA(TInt, "weird name \t test")
+    val (sigs, i) = vds.insertVA(TInt32(), "weird name \t test")
     vds = vds
-      .mapAnnotations((v, va, gs) => i(va, 1000))
-      .copy(vaSignature = sigs)
+      .mapAnnotations(sigs, (v, va, gs) => i(va, 1000))
     assert(vds.filterVariantsExpr("va.`weird name \\t test` > 500").countVariants() == vds.countVariants)
 
     TestUtils.interceptFatal("invalid escape character.*backtick identifier.*\\\\i")(
       vds.filterVariantsExpr("va.`bad\\input` == 5"))
-  }
-
-  @Test def testPAB() {
-    hc.importVCF("src/test/resources/sample.vcf")
-      .splitMulti()
-      .filterGenotypes("g.isHet() && g.pAB() > 0.0005")
-      .expand()
-      .collect()
-      .foreach { case (v, s, g) =>
-        assert(!g.isHet || g.pAB().forall(_ > 0.0005))
-      }
   }
 }

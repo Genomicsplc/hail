@@ -1,15 +1,61 @@
 package is.hail.utils.richUtils
 
+import java.io.{DataInputStream, DataOutputStream}
+
 import breeze.linalg.DenseMatrix
+import is.hail.annotations.Memory
 import is.hail.utils.ArrayBuilder
 
-object RichDenseMatrixDouble {
-  def horzcat(oms: Option[DenseMatrix[Double]]*): Option[DenseMatrix[Double]] = {
-    val ms = oms.flatten
-    if (ms.isEmpty)
-      None
-    else
-      Some(DenseMatrix.horzcat(ms: _*))
+object RichDenseMatrixDouble {  
+  // copies n doubles as bytes from data to dos
+  def writeDoubles(dos: DataOutputStream, data: Array[Double], n: Int) {
+    assert(n <= data.length)
+    var nLeft = n
+    val bufSize = math.min(nLeft, 8192)
+    val buf = new Array[Byte](bufSize << 3) // up to 64KB of doubles
+
+    var off = 0
+    while (nLeft > 0) {
+      val nCopy = math.min(nLeft, bufSize)
+      
+      Memory.memcpy(buf, 0, data, off, nCopy)
+      dos.write(buf, 0, nCopy << 3)
+
+      off += nCopy
+      nLeft -= nCopy
+    }
+  }
+
+  // copies n doubles as bytes from dis to data
+  def readDoubles(dis: DataInputStream, data: Array[Double], n: Int) {
+    assert(n <= data.length)
+    var nLeft = n
+    val bufSize = math.min(nLeft, 8192)
+    val buf = new Array[Byte](bufSize << 3) // up to 64KB of doubles
+
+    var off = 0
+    while (nLeft > 0) {
+      val nCopy = math.min(nLeft, bufSize)
+      
+      dis.readFully(buf, 0, nCopy << 3)
+      Memory.memcpy(data, off, buf, 0, nCopy)
+
+      off += nCopy
+      nLeft -= nCopy
+    }
+  }
+  
+  // assumes zero offset and minimal majorStride 
+  def read(dis: DataInputStream): DenseMatrix[Double] = {
+    val rows = dis.readInt()
+    val cols = dis.readInt()
+    val isTranspose = dis.readBoolean()
+
+    val data = new Array[Double](rows * cols)
+    readDoubles(dis, data, data.length)
+    
+    new DenseMatrix[Double](rows, cols, data,
+      offset = 0, majorStride = if (isTranspose) cols else rows, isTranspose = isTranspose)
   }
 }
 
@@ -49,5 +95,31 @@ class RichDenseMatrixDouble(val m: DenseMatrix[Double]) extends AnyVal {
       Some(new DenseMatrix[Double](rows = m.rows, cols = nCols, data = ab.result()))
     else
       None
+  }
+
+  def forceSymmetry() {
+    require(m.rows == m.cols, "only square matrices can be made symmetric")
+
+    var i = 0
+    while (i < m.rows) {
+      var j = i + 1
+      while (j < m.rows) {
+        m(i, j) = m(j, i)
+        j += 1
+      }
+      i += 1
+    }
+  }
+  
+  def write(dos: DataOutputStream) {
+    assert(m.offset == 0)
+    assert(m.majorStride == (if (m.isTranspose) m.cols else m.rows))
+
+    dos.writeInt(m.rows)
+    dos.writeInt(m.cols)
+    assert(m.data.length == m.rows * m.cols)
+    dos.writeBoolean(m.isTranspose)
+    
+    RichDenseMatrixDouble.writeDoubles(dos, m.data, m.data.length)
   }
 }
