@@ -2,7 +2,7 @@
 
 if [[ -z "${SPARK_HOME}" ]]
 then
-    echo 'Please set the SPARK_HOME variable to the path to a Spark installation, e.g. /opt/spark-2.0.2-bin-hadoop2.7' >&2
+    echo 'Please set the SPARK_HOME variable to the path to a Spark installation, e.g. /opt/spark-2.2.0-bin-hadoop2.7' >&2
     exit -1
 fi
 

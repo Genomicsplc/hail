@@ -131,7 +131,7 @@ class RichRDD[T](val r: RDD[T]) extends AnyVal {
   /**
     * Parts of this method are lifted from:
     *   org.apache.spark.rdd.RDD.take
-    *   Spark version 2.0.2
+    *   Spark version 2.2.0
     */
   def head(n: Long)(implicit ct: ClassTag[T]): RDD[T] = {
     require(n >= 0)

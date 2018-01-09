@@ -1007,7 +1007,7 @@ class Table(val hc: HailContext,
     /**
       * Parts of this method are lifted from:
       *   org.apache.spark.sql.Dataset.showString
-      * Spark version 2.0.2
+      * Spark version 2.2.0
       */
 
     require(n >= 0, s"number of rows to show must be non-negative, found $n")

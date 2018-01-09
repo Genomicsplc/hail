@@ -7,7 +7,7 @@ Getting Started
 You'll need:
 
 - The `Java 8 JDK <http://www.oracle.com/technetwork/java/javase/downloads/index.html>`_.
-- `Spark 2.0.2 <http://spark.apache.org/downloads.html>`_. Hail should work with other versions of Spark 2, see below.
+- `Spark 2.2.0 <http://spark.apache.org/downloads.html>`_. Hail should work with other versions of Spark 2, see below.
 - Python 2.7 and Jupyter Notebooks. We recommend the free `Anaconda distribution <https://www.continuum.io/downloads>`_.
 
 -----------------------------------------------------
@@ -55,10 +55,10 @@ ready-to-use JARs for Google Cloud Dataproc, see
 For all other Spark clusters, you will need to build Hail from the source code.
 
 Hail should be built on the master node of the Spark cluster with the following
-command, replacing ``2.0.2`` with the version of Spark available on your
+command, replacing ``2.2.0`` with the version of Spark available on your
 cluster::
 
-    ./gradlew -Dspark.version=2.0.2 shadowJar archiveZip
+    ./gradlew -Dspark.version=2.2.0 shadowJar archiveZip
 
 An IPython shell which can run Hail backed by the cluster can be started with
 the following command, it is important that the Spark located at ``SPARK_HOME``
@@ -129,9 +129,9 @@ the same as above, except:
 
  - On a Cloudera cluster, when building a Hail JAR, you must specify a Cloudera
    version of Spark. The following example builds a Hail JAR for Cloudera's
-   2.0.2 version of Spark::
+   2.2.0 version of Spark::
  
-    ./gradlew shadowJar -Dspark.version=2.0.2.cloudera
+    ./gradlew shadowJar -Dspark.version=2.2.0.cloudera
 
  - On a Cloudera cluster, ``SPARK_HOME`` should be set as:
    ``SPARK_HOME=/opt/cloudera/parcels/SPARK2/lib/spark2``,
