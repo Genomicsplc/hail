@@ -1,6 +1,6 @@
 name: hail
 dependencies:
-  - python
+  - python 3.6.3
   - Sphinx
   - conda-forge::nbsphinx
   - conda-forge::sphinx_rtd_theme
