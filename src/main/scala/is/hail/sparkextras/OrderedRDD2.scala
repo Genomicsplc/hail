@@ -1,50 +1,18 @@
 package is.hail.sparkextras
 
 import is.hail.annotations._
-import is.hail.rvd.{OrderedRVD, OrderedRVPartitioner}
+import is.hail.rvd.{OrderedRVD, OrderedRVPartitioner, OrderedRVType}
 import is.hail.utils._
 import org.apache.spark._
 import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.Row
 
-object BinarySearch {
-  // return smallest elem such that key <= elem
-  def binarySearch(length: Int,
-    // key.compare(elem)
-    compare: (Int) => Int): Int = {
-    assert(length > 0)
-
-    var low = 0
-    var high = length - 1
-    while (low < high) {
-      val mid = (low + high) / 2
-      assert(mid >= low && mid < high)
-
-      // key <= elem
-      if (compare(mid) <= 0) {
-        high = mid
-      } else {
-        low = mid + 1
-      }
-    }
-    assert(low == high)
-    assert(low >= 0 && low < length)
-
-    // key <= low
-    assert(compare(low) <= 0 || low == length - 1)
-    // low == 0 || (low - 1) > key
-    assert(low == 0
-      || compare(low - 1) > 0)
-
-    low
-  }
-}
-
-class OrderedDependency2(left: OrderedRVD, right: OrderedRVD) extends NarrowDependency[RegionValue](right.rdd) {
+class OrderedDependency(left: OrderedRVD, right: OrderedRVD) extends NarrowDependency[RegionValue](right.rdd) {
   override def getParents(partitionId: Int): Seq[Int] =
-    OrderedDependency2.getDependencies(left.partitioner, right.partitioner)(partitionId)
+    OrderedDependency.getDependencies(left.partitioner, right.partitioner)(partitionId)
 }
 
-object OrderedDependency2 {
+object OrderedDependency {
   def getDependencies(p1: OrderedRVPartitioner, p2: OrderedRVPartitioner)(partitionId: Int): Range = {
     val lastPartition = if (partitionId == p1.rangeBounds.length)
       p2.numPartitions - 1
@@ -65,7 +33,7 @@ case class OrderedJoinDistinctRDD2Partition(index: Int, leftPartition: Partition
 class OrderedJoinDistinctRDD2(left: OrderedRVD, right: OrderedRVD, joinType: String)
   extends RDD[JoinedRegionValue](left.sparkContext,
     Seq[Dependency[_]](new OneToOneDependency(left.rdd),
-      new OrderedDependency2(left, right))) {
+      new OrderedDependency(left, right))) {
   assert(joinType == "left" || joinType == "inner")
   override val partitioner: Option[Partitioner] = Some(left.partitioner)
 
@@ -73,7 +41,7 @@ class OrderedJoinDistinctRDD2(left: OrderedRVD, right: OrderedRVD, joinType: Str
     Array.tabulate[Partition](left.getNumPartitions)(i =>
       OrderedJoinDistinctRDD2Partition(i,
         left.partitions(i),
-        OrderedDependency2.getDependencies(left.partitioner, right.partitioner)(i)
+        OrderedDependency.getDependencies(left.partitioner, right.partitioner)(i)
           .map(right.partitions)
           .toArray))
   }
@@ -93,5 +61,115 @@ class OrderedJoinDistinctRDD2(left: OrderedRVD, right: OrderedRVD, joinType: Str
       case "left" => new OrderedLeftJoinDistinctIterator(left.typ, right.typ, leftIt, rightIt)
       case _ => fatal(s"Unknown join type `$joinType'. Choose from `inner' or `left'.")
     }
+  }
+}
+
+class OrderedZipJoinIterator(
+  leftTyp: OrderedRVType, rightTyp: OrderedRVType,
+  lit: Iterator[RegionValue], rit: Iterator[RegionValue])
+  extends Iterator[JoinedRegionValue] {
+
+  private val lrKOrd = OrderedRVType.selectUnsafeOrdering(leftTyp.rowType, leftTyp.kRowFieldIdx, rightTyp.rowType, rightTyp.kRowFieldIdx)
+
+  val jrv = JoinedRegionValue()
+  var present: Boolean = false
+
+  var lrv: RegionValue = _
+  var rrv: RegionValue = _
+
+  def nextLeft() {
+    if (lrv == null && lit.hasNext)
+      lrv = lit.next()
+  }
+
+  def nextRight() {
+    if (rrv == null && rit.hasNext)
+      rrv = rit.next()
+  }
+
+  def hasNext: Boolean = {
+    if (!present) {
+      nextLeft()
+      nextRight()
+
+      val c = {
+        if (lrv != null) {
+          if (rrv != null)
+            lrKOrd.compare(lrv, rrv)
+          else
+            -1
+        } else if (rrv != null)
+          1
+        else {
+          assert(!lit.hasNext && !rit.hasNext)
+          return false
+        }
+      }
+
+      if (c == 0) {
+        jrv.rvLeft = lrv
+        jrv.rvRight = rrv
+        lrv = null
+        rrv = null
+      } else if (c < 0) {
+        jrv.rvLeft = lrv
+        lrv = null
+        jrv.rvRight = null
+      } else {
+        // c > 0
+        jrv.rvLeft = null
+        jrv.rvRight = rrv
+        rrv = null
+      }
+      present = true
+    }
+
+    present
+  }
+
+  def next(): JoinedRegionValue = {
+    if (!hasNext)
+      throw new NoSuchElementException("next on empty iterator")
+    present = false
+    jrv
+  }
+}
+
+case class OrderedZipJoinRDDPartition(index: Int, leftPartition: Partition, rightPartitions: Array[Partition]) extends Partition
+
+class OrderedZipJoinRDD(left: OrderedRVD, right: OrderedRVD)
+  extends RDD[JoinedRegionValue](left.sparkContext,
+    Seq[Dependency[_]](new OneToOneDependency(left.rdd),
+      new OrderedDependency(left, right))) {
+  private val leftPartitionForRightRow = new OrderedRVPartitioner(
+    left.partitioner.numPartitions,
+    right.typ.partitionKey,
+    right.typ.rowType,
+    left.partitioner.rangeBounds)
+
+  override val partitioner: Option[Partitioner] = Some(left.partitioner)
+
+  def getPartitions: Array[Partition] = {
+    Array.tabulate[Partition](left.getNumPartitions)(i =>
+      OrderedZipJoinRDDPartition(i,
+        left.partitions(i),
+        OrderedDependency.getDependencies(left.partitioner, right.partitioner)(i)
+          .map(right.partitions)
+          .toArray))
+  }
+
+  override def getPreferredLocations(split: Partition): Seq[String] = left.rdd.preferredLocations(split)
+
+  override def compute(split: Partition, context: TaskContext): Iterator[JoinedRegionValue] = {
+    val partition = split.asInstanceOf[OrderedZipJoinRDDPartition]
+    val index = partition.index
+
+    val leftIt = left.rdd.iterator(partition.leftPartition, context)
+    val rightIt = partition.rightPartitions.iterator.flatMap { p =>
+      right.rdd.iterator(p, context)
+    }
+      .filter { rrv => leftPartitionForRightRow.getPartition(rrv) == index }
+
+    new OrderedZipJoinIterator(left.typ, right.typ, leftIt, rightIt)
   }
 }

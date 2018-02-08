@@ -2,8 +2,7 @@ package is.hail.variant
 
 import is.hail.annotations.{Region, RegionValue}
 import is.hail.check.{Arbitrary, Gen}
-import is.hail.expr._
-import is.hail.sparkextras.OrderedKey
+import is.hail.expr.types._
 import is.hail.utils._
 import org.apache.spark.SparkContext
 import org.apache.spark.rdd.RDD
@@ -12,8 +11,6 @@ import org.apache.spark.sql.types._
 import org.json4s._
 
 import scala.collection.JavaConverters._
-import scala.math.Numeric.Implicits._
-import scala.reflect.ClassTag
 
 object Contig {
   def gen(gr: GenomeReference): Gen[(String, Int)] = Gen.oneOfSeq(gr.lengths.toSeq)
@@ -33,25 +30,47 @@ object Variant {
   def apply(contig: String,
     start: Int,
     ref: String,
-    alt: String): Variant = Variant(contig, start, ref, Array(AltAllele(ref, alt)))
+    alt: String): Variant = {
+    Variant(contig, start, ref, Array(AltAllele(ref, alt)))
+  }
 
   def apply(contig: String,
     start: Int,
     ref: String,
-    alts: Array[String]): Variant =
-    Variant(contig, start, ref, alts.map(alt => AltAllele(ref, alt)))
+    alt: String,
+    gr: GRBase): Variant = {
+    gr.checkVariant(contig, start, ref, alt)
+    Variant(contig, start, ref, alt)
+  }
 
   def apply(contig: String,
     start: Int,
     ref: String,
-    alts: java.util.ArrayList[String]): Variant = Variant(contig, start, ref, alts.asScala.toArray)
+    alts: Array[String]): Variant = Variant(contig, start, ref, alts.map(alt => AltAllele(ref, alt)))
 
-  def parse(str: String): Variant = {
-    val colonSplit = str.split(":")
-    if (colonSplit.length != 4)
-      fatal(s"invalid variant, expected 4 colon-delimited fields, found ${ colonSplit.length }: $str")
-    val Array(contig, start, ref, alts) = colonSplit
-    Variant(contig, start.toInt, ref, alts.split(","))
+  def apply(contig: String,
+    start: Int,
+    ref: String,
+    alts: Array[String],
+    gr: GRBase): Variant = {
+    gr.checkVariant(contig, start, ref, alts)
+    Variant(contig, start, ref, alts)
+  }
+
+  def apply(contig: String,
+    start: Int,
+    ref: String,
+    alts: java.util.ArrayList[String],
+    gr: GRBase): Variant = Variant(contig, start, ref, alts.asScala.toArray, gr)
+
+  def parse(str: String, gr: GRBase): Variant = {
+    val elts = str.split(":")
+    val size = elts.length
+    if (size < 4)
+      fatal(s"Invalid string for Variant. Expecting contig:pos:ref:alt1,alt2 -- found `$str'.")
+
+    val contig = elts.take(size - 3).mkString(":")
+    Variant(contig, elts(size - 3).toInt, elts(size - 2), elts(size - 1).split(","), gr)
   }
 
   def fromRegionValue(r: Region, offset: Long): Variant = {
@@ -101,19 +120,6 @@ object Variant {
       r.getSeq[Row](3)
         .map(s => AltAllele.fromRow(s))
         .toArray)
-
-  def orderedKey(gr: GenomeReference): OrderedKey[Locus, Variant] =
-    new OrderedKey[Locus, Variant] {
-      def project(key: Variant): Locus = key.locus
-
-      val kOrd: Ordering[Variant] = gr.variantOrdering
-
-      val pkOrd: Ordering[Locus] = gr.locusOrdering
-
-      val kct: ClassTag[Variant] = implicitly[ClassTag[Variant]]
-
-      val pkct: ClassTag[Locus] = implicitly[ClassTag[Locus]]
-    }
 
   def variantUnitRdd(sc: SparkContext, input: String): RDD[(Variant, Unit)] =
     sc.textFileLines(input)

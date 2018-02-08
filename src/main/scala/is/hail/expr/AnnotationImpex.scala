@@ -1,6 +1,7 @@
 package is.hail.expr
 
 import is.hail.annotations.Annotation
+import is.hail.expr.types._
 import is.hail.utils.{Interval, _}
 import is.hail.variant.{AltAllele, GenomeReference, Locus, Variant}
 import org.apache.spark.sql.Row
@@ -90,8 +91,7 @@ object SparkAnnotationImpex extends AnnotationImpex[DataType, Any] {
           Locus(r.getAs[String](0), r.getAs[Int](1))
         case x: TInterval =>
           val r = a.asInstanceOf[Row]
-          implicit val locusOrd = x.locusOrdering
-          Interval(importAnnotation(r.get(0), TLocus(x.gr)).asInstanceOf[Locus], importAnnotation(r.get(1), TLocus(x.gr)).asInstanceOf[Locus])
+          Interval(importAnnotation(r.get(0), x.pointType), importAnnotation(r.get(1), x.pointType))
         case TStruct(fields, _) =>
           if (fields.isEmpty)
             if (a.asInstanceOf[Boolean]) Annotation.empty else null
@@ -169,9 +169,9 @@ object SparkAnnotationImpex extends AnnotationImpex[DataType, Any] {
         case TLocus(gr, _) =>
           val l = a.asInstanceOf[Locus]
           Row(l.contig, l.position)
-        case TInterval(gr, _) =>
-          val i = a.asInstanceOf[Interval[_]]
-          Row(exportAnnotation(i.start, TLocus(gr)), exportAnnotation(i.end, TLocus(gr)))
+        case TInterval(pointType, _) =>
+          val i = a.asInstanceOf[Interval]
+          Row(exportAnnotation(i.start, pointType), exportAnnotation(i.end, pointType))
         case TStruct(fields, _) =>
           if (fields.isEmpty)
             a != null
@@ -194,16 +194,14 @@ case class JSONExtractVariant(contig: String,
     Variant(contig, start, ref, altAlleles.toArray)
 }
 
-case class JSONExtractInterval(start: Locus, end: Locus) {
-  def toInterval(ord: Ordering[Locus]) = Interval(start, end)(ord)
-
+case class JSONExtractIntervalLocus(start: Locus, end: Locus) {
   def toLocusTuple: (Locus, Locus) = (start, end)
 }
 
 case class JSONExtractContig(name: String, length: Int)
 
 case class JSONExtractGenomeReference(name: String, contigs: Array[JSONExtractContig], xContigs: Set[String],
-  yContigs: Set[String], mtContigs: Set[String], par: Array[JSONExtractInterval]) {
+  yContigs: Set[String], mtContigs: Set[String], par: Array[JSONExtractIntervalLocus]) {
 
   def toGenomeReference: GenomeReference = GenomeReference(name, contigs.map(_.name),
     contigs.map(c => (c.name, c.length)).toMap, xContigs, yContigs, mtContigs, par.map(_.toLocusTuple))
@@ -289,7 +287,7 @@ object JSONAnnotationImpex extends AnnotationImpex[Type, JValue] {
         case _: TAltAllele => a.asInstanceOf[AltAllele].toJSON
         case TVariant(_, _) => a.asInstanceOf[Variant].toJSON
         case TLocus(_, _) => a.asInstanceOf[Locus].toJSON
-        case TInterval(gr, _) => a.asInstanceOf[Interval[Locus]].toJSON(TLocus(gr).toJSON(_))
+        case TInterval(pointType, _) => a.asInstanceOf[Interval].toJSON(pointType.toJSON)
         case TStruct(fields, _) =>
           val row = a.asInstanceOf[Row]
           JObject(fields
@@ -378,8 +376,15 @@ object JSONAnnotationImpex extends AnnotationImpex[Type, JValue] {
         jv.extract[JSONExtractVariant].toVariant
       case (_, TLocus(_, _)) =>
         jv.extract[Locus]
-      case (_, TInterval(gr, _)) =>
-        jv.extract[JSONExtractInterval].toInterval(gr.locusOrdering)
+      case (_, TInterval(pointType, _)) =>
+        jv match {
+          case JObject(List(("start", sjv), ("end", ejv))) =>
+            Interval(importAnnotation(sjv, pointType, parent + ".start"),
+              importAnnotation(ejv, pointType, parent + ".end"))
+          case _ =>
+            warn(s"Can't convert JSON value $jv to type $t at $parent.")
+            null
+        }
       case (JInt(x), _: TCall) => x.toInt
 
       case (JArray(a), TArray(elementType, _)) =>
@@ -412,11 +417,14 @@ object TableAnnotationImpex extends AnnotationImpex[Unit, String] {
         case d: TDict => JsonMethods.compact(d.toJSON(a))
         case it: TIterable => JsonMethods.compact(it.toJSON(a))
         case t: TStruct => JsonMethods.compact(t.toJSON(a))
+        case TInterval(TLocus(gr, _), _) =>
+          val i = a.asInstanceOf[Interval]
+          if (i.start.asInstanceOf[Locus].contig == i.end.asInstanceOf[Locus].contig)
+            s"${ i.start }-${ i.end.asInstanceOf[Locus].position }"
+          else
+            s"${ i.start }-${ i.end }"
         case _: TInterval =>
-          val i = a.asInstanceOf[Interval[Locus]]
-          if (i.start.contig == i.end.contig)
-            s"${ i.start }-${ i.end.position }"
-          else s"${ i.start }-${ i.end }"
+          JsonMethods.compact(t.toJSON(a))
         case _ => a.toString
       }
     }
@@ -430,9 +438,11 @@ object TableAnnotationImpex extends AnnotationImpex[Unit, String] {
       case _: TFloat32 => a.toFloat
       case _: TFloat64 => if (a == "nan") Double.NaN else a.toDouble
       case _: TBoolean => a.toBoolean
-      case _: TLocus => Locus.parse(a)
-      case t: TInterval => Locus.parseInterval(a, t.gr)
-      case _: TVariant => Variant.parse(a)
+      case tl: TLocus => Locus.parse(a, tl.gr)
+        // FIXME legacy
+      case TInterval(TLocus(gr, _), _) => Locus.parseInterval(a, gr)
+      case t: TInterval => JSONAnnotationImpex.importAnnotation(JsonMethods.parse(a), t)
+      case tv: TVariant => Variant.parse(a, tv.gr)
       case _: TAltAllele => a.split("/") match {
         case Array(ref, alt) => AltAllele(ref, alt)
       }

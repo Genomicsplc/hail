@@ -5,6 +5,7 @@ import is.hail.annotations.Annotation
 import is.hail.asm4s.Code._
 import is.hail.asm4s.{Code, _}
 import is.hail.expr.CompilationHelp.arrayToWrappedArray
+import is.hail.expr.types._
 import is.hail.methods._
 import is.hail.stats._
 import is.hail.utils.EitherIsAMonad._
@@ -211,7 +212,7 @@ object FunctionRegistry {
                 (name, typ, ret(Code.checkcast(fb.arg2.invoke[Int, AnyRef]("apply", i))(typ.scalaClassTag)))
               } :+ ((param, paramType, ret(Code.checkcast(fb.arg2.invoke[Int, AnyRef]("apply", idx))(paramType.scalaClassTag)))));
             res <- bindRepInRaw(bindings)(body.compile())
-          ) yield res).runWithDelayedValues(bodyST.toSeq.map { case (name, (_, typ)) => (name, typ) }, ec);
+          ) yield res).runWithDelayedValues(bodyST.toSeq.zipWithIndex.map { case ((name, (_, typ)), i) => (name, typ, i) }, ec);
 
           g = (x: Any) => {
             localA(idx) = x
@@ -244,7 +245,7 @@ object FunctionRegistry {
                 (name, typ, ret(Code.checkcast(fb.arg2.invoke[Int, AnyRef]("apply", i))(typ.scalaClassTag)))
               } :+ ((param, paramType, ret(Code.checkcast(fb.arg2.invoke[Int, AnyRef]("apply", idx))(paramType.scalaClassTag)))));
             res <- bindRepInRaw(bindings)(body.compile())
-          ) yield res).runWithDelayedValues(bodyST.toSeq.map { case (name, (_, typ)) => (name, typ) }, ec);
+          ) yield res).runWithDelayedValues(bodyST.toSeq.map { case (name, (i, typ)) => (name, typ, i) }, ec);
 
           g = (x: Any) => {
             localA(idx) = x
@@ -461,6 +462,11 @@ object FunctionRegistry {
   def registerMethod[T, U, V](name: String, impl: (T, U) => V, docstring: String, argNames: (String, String)*)
     (implicit hrt: HailRep[T], hru: HailRep[U], hrv: HailRep[V]) = {
     bind(name, MethodType(hrt.typ, hru.typ), BinaryFun[T, U, V](hrv.typ, impl), MetaData(Option(docstring), argNames))
+  }
+
+  def registerMethodDependent[T, U, V](name: String, impl: () => (T, U) => V, docstring: String, argNames: (String, String)*)
+    (implicit hrt: HailRep[T], hru: HailRep[U], hrv: HailRep[V]) = {
+    bind(name, MethodType(hrt.typ, hru.typ), BinaryDependentFun[T, U, V](hrv.typ, impl), MetaData(Option(docstring), argNames))
   }
 
   def registerMethodCode[T, U, V](name: String, impl: (Code[T], Code[U]) => CM[Code[V]], docstring: String, argNames: (String, String)*)
@@ -704,36 +710,22 @@ object FunctionRegistry {
     (stx, x) <- CM.memoize(v)
   ) yield Code(stx, check(x).mux(Code._null[U], ifPresent(x)))
 
-  registerField("gt", { (c: Call) => c }, "the integer ``gt = k*(k+1)/2 + j`` for call ``j/k`` (0 = 0/0, 1 = 0/1, 2 = 1/1, 3 = 0/2, etc.).")(callHr, boxedInt32Hr)
-  registerMethodSpecial("gtj", { (c: () => Any) => Call.gtj(c().asInstanceOf[Call]) }, "the index of allele ``j`` for call ``j/k`` (0 = ref, 1 = first alt allele, etc.).")(callHr, boxedInt32Hr)
-  registerMethodSpecial("gtk", { (c: () => Any) => Call.gtk(c().asInstanceOf[Call]) }, "the index of allele ``k`` for call ``j/k`` (0 = ref, 1 = first alt allele, etc.).")(callHr, boxedInt32Hr)
-  registerMethodSpecial("isHomRef", { (c: () => Any) => Call.isHomRef(c().asInstanceOf[Call]) }, "True if this call is ``0/0``.")(callHr, boolHr)
-  registerMethodSpecial("isHet", { (c: () => Any) => Call.isHet(c().asInstanceOf[Call]) }, "True if this call is heterozygous.")(callHr, boolHr)
-  registerMethodSpecial("isHomVar", { (c: () => Any) => Call.isHomVar(c().asInstanceOf[Call]) }, "True if this call is ``j/j`` with ``j>0``.")(callHr, boolHr)
-  registerMethodSpecial("isNonRef", { (c: () => Any) => Call.isNonRef(c().asInstanceOf[Call]) }, "True if either ``isHet`` or ``isHomVar`` is true.")(callHr, boolHr)
-  registerMethodSpecial("isHetNonRef", { (c: () => Any) => Call.isHetNonRef(c().asInstanceOf[Call]) }, "True if this call is ``j/k`` with ``j>0``.")(callHr, boolHr)
-  registerMethodSpecial("isHetRef", { (c: () => Any) => Call.isHetRef(c().asInstanceOf[Call]) }, "True if this call is ``0/k`` with ``k>0``.")(callHr, boolHr)
-  registerMethodSpecial("nNonRefAlleles", { (c: () => Any) => Call.nNonRefAlleles(c().asInstanceOf[Call]) }, "the number of called alternate alleles.")(callHr, boxedInt32Hr)
-  registerMethodSpecial("oneHotAlleles", { (c: () => Any, v: () => Any) =>
-    val call = c().asInstanceOf[Call]
-    val variant = v().asInstanceOf[Variant]
-    if (call != null && variant != null)
-      Call.oneHotAlleles(call, variant)
-    else
-      null
-  },
+  registerField("gt", { (c: Call) => c }, "the integer ``gt = k*(k+1)/2 + j`` for call ``j/k`` (0 = 0/0, 1 = 0/1, 2 = 1/1, 3 = 0/2, etc.).")(callHr, int32Hr)
+  registerMethod("gtj", { (c: Call) => Call.gtj(c) }, "the index of allele ``j`` for call ``j/k`` (0 = ref, 1 = first alt allele, etc.).")(callHr, int32Hr)
+  registerMethod("gtk", { (c: Call) => Call.gtk(c) }, "the index of allele ``k`` for call ``j/k`` (0 = ref, 1 = first alt allele, etc.).")(callHr, int32Hr)
+  registerMethod("isHomRef", { (c: Call) => Call.isHomRef(c) }, "True if this call is ``0/0``.")(callHr, boolHr)
+  registerMethod("isHet", { (c: Call) => Call.isHet(c) }, "True if this call is heterozygous.")(callHr, boolHr)
+  registerMethod("isHomVar", { (c: Call) => Call.isHomVar(c) }, "True if this call is ``j/j`` with ``j>0``.")(callHr, boolHr)
+  registerMethod("isNonRef", { (c: Call) => Call.isNonRef(c) }, "True if either ``isHet`` or ``isHomVar`` is true.")(callHr, boolHr)
+  registerMethod("isHetNonRef", { (c: Call) => Call.isHetNonRef(c) }, "True if this call is ``j/k`` with ``j>0``.")(callHr, boolHr)
+  registerMethod("isHetRef", { (c: Call) => Call.isHetRef(c) }, "True if this call is ``0/k`` with ``k>0``.")(callHr, boolHr)
+  registerMethod("nNonRefAlleles", { (c: Call) => Call.nNonRefAlleles(c) }, "the number of called alternate alleles.")(callHr, int32Hr)
+  registerMethod("oneHotAlleles", { (c: Call, v: Variant) => Call.oneHotAlleles(c, v) },
     """
     Produce an array of called counts for each allele in the variant (including reference). For example, calling this function with a biallelic variant on hom-ref, het, and hom-var calls will produce ``[2, 0]``, ``[1, 1]``, and ``[0, 2]`` respectively.
     """,
     "v" -> ":ref:`variant(gr)`")(callHr, variantHr(GR), arrayHr(int32Hr))
-  registerMethodSpecial("oneHotGenotype", { (c: () => Any, v: () => Any) =>
-    val call = c().asInstanceOf[Call]
-    val variant = v().asInstanceOf[Variant]
-    if (call != null && variant != null)
-      Call.oneHotGenotype(call, variant)
-    else
-      null
-  },
+  registerMethod("oneHotGenotype", { (c: Call, v: Variant) => Call.oneHotGenotype(c, v) },
     """
     Produces an array with one element for each possible genotype in the variant, where the called genotype is 1 and all else 0. For example, calling this function with a biallelic variant on hom-ref, het, and hom-var calls will produce ``[1, 0, 0]``, ``[0, 1, 0]``, and ``[0, 0, 1]`` respectively.
     """,
@@ -786,11 +778,19 @@ object FunctionRegistry {
   registerMethodDependent("isAutosomal", { () =>
     val gr = GR.gr
     (x: Variant) => x.isAutosomal(gr)
-  }, "True if chromosome is not X, not Y, and not MT.")(variantHr(GR), boolHr)
+  }, "True if chromosome is not an X, Y, or MT contig.")(variantHr(GR), boolHr)
+  registerMethodDependent("isAutosomalOrPseudoAutosomal", { () =>
+    val gr = GR.gr
+    (x: Variant) => x.isAutosomalOrPseudoAutosomal(gr)
+  }, "True if chromosome is autosomal or in PAR on X or Y.")(variantHr(GR), boolHr)
+  registerMethodDependent("isMitochondrial", { () =>
+    val gr = GR.gr
+    (x: Variant) => x.isMitochondrial(gr)
+  }, "True if contig is mitochondrial")(variantHr(GR), boolHr)
   registerField("contig", { (x: Locus) => x.contig }, "String representation of contig.")(locusHr(GR), stringHr)
   registerField("position", { (x: Locus) => x.position }, "Chromosomal position.")(locusHr(GR), int32Hr)
-  registerField("start", { (x: Interval[Locus]) => x.start }, ":ref:`locus(gr)` at the start of the interval (inclusive).")(locusIntervalHr(GR), locusHr(GR))
-  registerField("end", { (x: Interval[Locus]) => x.end }, ":ref:`locus(gr)` at the end of the interval (exclusive).")(locusIntervalHr(GR), locusHr(GR))
+  registerField("start", { (x: Interval) => x.start }, "Start of the interval (inclusive).")(intervalHr(TTHr), TTHr)
+  registerField("end", { (x: Interval) => x.end }, "End of the interval (exclusive).")(intervalHr(TTHr), TTHr)
   registerField("ref", { (x: AltAllele) => x.ref }, "Reference allele base sequence.")
   registerField("alt", { (x: AltAllele) => x.alt }, "Alternate allele base sequence.")
   registerMethod("isSNP", { (x: AltAllele) => x.isSNP }, "True if ``v.ref`` and ``v.alt`` are the same length and differ in one position.")
@@ -955,12 +955,17 @@ object FunctionRegistry {
     "stop" -> "Generate numbers up to, but not including this number.",
     "step" -> "Difference between each number in the sequence.")
 
-  registerCode("Call", (gt: Code[java.lang.Integer]) => CM.ret(gt),
+  registerCode("Call", (gt: Code[Int]) => CM.ret(gt),
     """
     Construct a :ref:`call` from an integer.
-    """, "gt" -> "integer")(boxedInt32Hr, callHr)
+    """, "gt" -> "integer")(int32Hr, callHr)
 
-  register("Variant", { (x: String) => Variant.parse(x) },
+  register("AltAllele", { (ref: String, alt: String) => AltAllele(ref, alt)}, "")(stringHr, stringHr, altAlleleHr)
+
+  registerDependent("Variant", { () =>
+    val gr = GR.gr
+    (x: String) => Variant.parse(x, gr)
+    },
     """
     Construct a :ref:`variant(gr)` object.
 
@@ -972,9 +977,10 @@ object FunctionRegistry {
     """,
     "s" -> "String of the form ``CHR:POS:REF:ALT`` or ``CHR:POS:REF:ALT1,ALT2...ALTN`` specifying the contig, position, reference and alternate alleles.")(stringHr, variantHr(GR))
 
-  register("AltAllele", { (ref: String, alt: String) => AltAllele(ref, alt)}, "")(stringHr, stringHr, altAlleleHr)
-
-  register("Variant", { (x: String, y: Int, z: String, a: String) => Variant(x, y, z, a) },
+  registerDependent("Variant", { () =>
+    val gr = GR.gr
+    (contig: String, pos: Int, ref: String, alt: String) => Variant(contig, pos, ref, alt, gr)
+    },
     """
     Construct a :ref:`variant(gr)` object.
 
@@ -988,7 +994,10 @@ object FunctionRegistry {
     "pos" -> "SNP position or start of an indel.",
     "ref" -> "Reference allele sequence.",
     "alt" -> "Alternate allele sequence.")(stringHr, int32Hr, stringHr, stringHr, variantHr(GR))
-  register("Variant", { (x: String, y: Int, z: String, a: IndexedSeq[String]) => Variant(x, y, z, a.toArray) },
+  registerDependent("Variant", { () =>
+    val gr = GR.gr
+    (contig: String, pos: Int, ref: String, alts: IndexedSeq[String]) => Variant(contig, pos, ref, alts.toArray, gr)
+    },
     """
     Construct a :ref:`variant(gr)` object.
 
@@ -1061,9 +1070,9 @@ object FunctionRegistry {
     "left" -> "Left variant to combine.",
     "right" -> "Right variant to combine.")(variantHr(GR), variantHr(GR))
 
-  register("Locus", { (x: String) =>
-    val Array(chr, pos) = x.split(":")
-    Locus(chr, pos.toInt)
+  registerDependent("Locus", { () =>
+    val gr = GR.gr
+    (x: String) => Locus.parse(x, gr)
   },
     """
     Construct a :ref:`locus(gr)` object.
@@ -1077,7 +1086,10 @@ object FunctionRegistry {
     ("s", "String of the form ``CHR:POS``")
   )(stringHr, locusHr(GR))
 
-  register("Locus", { (x: String, y: Int) => Locus(x, y) },
+  registerDependent("Locus", { () =>
+    val gr = GR.gr
+    (contig: String, pos: Int) => Locus(contig, pos, gr)
+    },
     """
     Construct a :ref:`locus(gr)` object.
 
@@ -1090,14 +1102,14 @@ object FunctionRegistry {
     "contig" -> "String representation of contig.",
     "pos" -> "SNP position or start of an indel.")(stringHr, int32Hr, locusHr(GR))
   registerDependent("Interval", () => {
-    val gr = GR.gr
-    (x: Locus, y: Locus) => Interval(x, y)(gr.locusOrdering)
+    val t = TT.t
+    (x: Annotation, y: Annotation) => Interval(x, y)
   },
     """
-    Construct a :ref:`interval(gr)` object. Intervals are **left inclusive, right exclusive**.  This means that ``[chr1:1, chr1:3)`` contains ``chr1:1`` and ``chr1:2``.
+    Construct an Interval object. Intervals are **left inclusive, right exclusive**.  This means that ``[chr1:1, chr1:3)`` contains ``chr1:1`` and ``chr1:2``.
     """,
     "startLocus" -> "Start position of interval",
-    "endLocus" -> "End position of interval")(locusHr(GR), locusHr(GR), locusIntervalHr(GR))
+    "endLocus" -> "End position of interval")(TTHr, TTHr, intervalHr(TTHr))
 
   val hweStruct = TStruct("rExpectedHetFrequency" -> TFloat64(), "pHWE" -> TFloat64())
 
@@ -1268,7 +1280,7 @@ object FunctionRegistry {
     """,
     "x" -> "the input to gamma.")
 
-  registerDependent("Interval", () => {
+  registerDependent("LocusInterval", () => {
     val gr = GR.gr
    (s: String) => Locus.parseInterval(s, gr)
   },
@@ -1282,14 +1294,11 @@ object FunctionRegistry {
         result: 10040532
     """,
     "s" -> "The string to parse."
-  )(stringHr, locusIntervalHr(GR))
+  )(stringHr, intervalHr(locusHr(GR)))
 
-  registerDependent("Interval", () => {
+  registerDependent("LocusInterval", () => {
     val gr = GR.gr
-    (chr: String, start: Int, end: Int) => {
-      implicit val locusOrdering = gr.locusOrdering
-      Interval(Locus(chr, start), Locus(chr, end))
-    }
+    (chr: String, start: Int, end: Int) => Locus.makeInterval(chr, start, end, gr)
   },
     """
     Constructs an interval from a given chromosome, start, and end.
@@ -1302,7 +1311,7 @@ object FunctionRegistry {
     """,
     "chr" -> "Chromosome.",
     "start" -> "Starting position.",
-    "end" -> "Ending position (exclusive).")(stringHr, int32Hr, int32Hr, locusIntervalHr(GR))
+    "end" -> "Ending position (exclusive).")(stringHr, int32Hr, int32Hr, intervalHr(locusHr(GR)))
 
   register("pcoin", { (p: Double) => math.random < p },
     """
@@ -1413,8 +1422,14 @@ object FunctionRegistry {
   def iToD(x: Code[java.lang.Integer]): Code[java.lang.Double] =
     Code.boxDouble(Code.intValue(x).toD)
 
+  def iToF(x: Code[java.lang.Integer]): Code[java.lang.Float] =
+    Code.boxFloat(Code.floatValue(x).toF)
+
   def lToD(x: Code[java.lang.Long]): Code[java.lang.Double] =
     Code.boxDouble(Code.longValue(x).toD)
+
+  def lToF(x: Code[java.lang.Long]): Code[java.lang.Float] =
+    Code.boxFloat(Code.longValue(x).toF)
 
   def iToL(x: Code[java.lang.Integer]): Code[java.lang.Long] =
     Code.boxLong(Code.intValue(x).toL)
@@ -1422,28 +1437,12 @@ object FunctionRegistry {
   def fToD(x: Code[java.lang.Float]): Code[java.lang.Double] =
     Code.boxDouble(Code.floatValue(x).toD)
 
-  registerConversion((x: java.lang.Integer) => x.toDouble: java.lang.Double, (iToD _).andThen(CM.ret _), priority = 2)
-  registerConversion((x: java.lang.Long) => x.toDouble: java.lang.Double, (lToD _).andThen(CM.ret _))
+  registerConversion((x: java.lang.Integer) => x.toFloat: java.lang.Float, (iToF _).andThen(CM.ret _), priority = 2)
+  registerConversion((x: java.lang.Integer) => x.toDouble: java.lang.Double, (iToD _).andThen(CM.ret _), priority = 3)
+  registerConversion((x: java.lang.Long) => x.toFloat: java.lang.Float, (lToF _).andThen(CM.ret _))
+  registerConversion((x: java.lang.Long) => x.toDouble: java.lang.Double, (lToD _).andThen(CM.ret _), priority = 2)
   registerConversion((x: java.lang.Integer) => x.toLong: java.lang.Long, (iToL _).andThen(CM.ret _))
   registerConversion((x: java.lang.Float) => x.toDouble: java.lang.Double, (fToD _).andThen(CM.ret _))
-
-  registerConversion((x: IndexedSeq[java.lang.Integer]) => x.map { xi =>
-    if (xi == null)
-      null
-    else
-      box(xi.toDouble)
-  }, { (x: Code[IndexedSeq[java.lang.Integer]]) =>
-    CM.mapIS(x, (xi: Code[java.lang.Integer]) => xi.mapNull(iToD _))
-  }, priority = 2)(arrayHr(boxedInt32Hr), arrayHr(boxedFloat64Hr))
-
-  registerConversion((x: IndexedSeq[java.lang.Long]) => x.map { xi =>
-    if (xi == null)
-      null
-    else
-      box(xi.toDouble)
-  }, { (x: Code[IndexedSeq[java.lang.Long]]) =>
-    CM.mapIS(x, (xi: Code[java.lang.Long]) => xi.mapNull(lToD _))
-  })(arrayHr(boxedInt64Hr), arrayHr(boxedFloat64Hr))
 
   registerConversion((x: IndexedSeq[java.lang.Integer]) => x.map { xi =>
     if (xi == null)
@@ -1453,6 +1452,42 @@ object FunctionRegistry {
   }, { (x: Code[IndexedSeq[java.lang.Integer]]) =>
     CM.mapIS(x, (xi: Code[java.lang.Integer]) => xi.mapNull(iToL _))
   })(arrayHr(boxedInt32Hr), arrayHr(boxedInt64Hr))
+
+  registerConversion((x: IndexedSeq[java.lang.Integer]) => x.map { xi =>
+    if (xi == null)
+      null
+    else
+      box(xi.toFloat)
+  }, { (x: Code[IndexedSeq[java.lang.Integer]]) =>
+    CM.mapIS(x, (xi: Code[java.lang.Integer]) => xi.mapNull(iToF _))
+  }, priority = 2)(arrayHr(boxedInt32Hr), arrayHr(boxedFloat32Hr))
+
+  registerConversion((x: IndexedSeq[java.lang.Integer]) => x.map { xi =>
+    if (xi == null)
+      null
+    else
+      box(xi.toDouble)
+  }, { (x: Code[IndexedSeq[java.lang.Integer]]) =>
+    CM.mapIS(x, (xi: Code[java.lang.Integer]) => xi.mapNull(iToD _))
+  }, priority = 3)(arrayHr(boxedInt32Hr), arrayHr(boxedFloat64Hr))
+
+  registerConversion((x: IndexedSeq[java.lang.Long]) => x.map { xi =>
+    if (xi == null)
+      null
+    else
+      box(xi.toFloat)
+  }, { (x: Code[IndexedSeq[java.lang.Long]]) =>
+    CM.mapIS(x, (xi: Code[java.lang.Long]) => xi.mapNull(lToF _))
+  })(arrayHr(boxedInt64Hr), arrayHr(boxedFloat32Hr))
+
+  registerConversion((x: IndexedSeq[java.lang.Long]) => x.map { xi =>
+    if (xi == null)
+      null
+    else
+      box(xi.toDouble)
+  }, { (x: Code[IndexedSeq[java.lang.Long]]) =>
+    CM.mapIS(x, (xi: Code[java.lang.Long]) => xi.mapNull(lToD _))
+  }, priority = 2)(arrayHr(boxedInt64Hr), arrayHr(boxedFloat64Hr))
 
   registerConversion((x: IndexedSeq[java.lang.Float]) => x.map { xi =>
     if (xi == null)
@@ -1558,9 +1593,12 @@ object FunctionRegistry {
     character frequency distribution.
     """)
 
-  registerMethod("contains", (interval: Interval[Locus], locus: Locus) => interval.contains(locus),
+  registerMethodDependent("contains", () => {
+    val pord = TT.t.ordering
+    (interval: Interval, point: Annotation) => interval.contains(pord, point)
+  },
     """
-    Returns true if the ``locus`` is in the interval.
+    Returns true if the ``point`` is contained in the interval.
 
     .. code-block:: text
         :emphasize-lines: 2
@@ -1568,7 +1606,7 @@ object FunctionRegistry {
         let i = Interval(Locus("1", 1000), Locus("1", 2000)) in i.contains(Locus("1", 1500))
         result: true
     """,
-    "locus" -> ":ref:`locus(gr)`")(locusIntervalHr(GR), locusHr(GR), boolHr)
+    "point" -> "T")(intervalHr(TTHr), TTHr, boolHr)
 
   val sizeDocstring = "Number of elements in the collection."
   registerMethod("length", (a: IndexedSeq[Any]) => a.length, sizeDocstring)(arrayHr(TTHr), int32Hr)
@@ -2064,12 +2102,12 @@ object FunctionRegistry {
 
     Calculate the info score per variant:
 
-    >>> (hc.import_gen("data/example.gen", "data/example.sample")
+    >>> (hc1.import_gen("data/example.gen", "data/example.sample")
     ...    .annotate_variants_expr('va.infoScore = gs.map(g => g.GP).infoScore()'))
 
     Calculate group-specific info scores per variant:
 
-    >>> vds_result = (hc.import_gen("data/example.gen", "data/example.sample")
+    >>> vds_result = (hc1.import_gen("data/example.gen", "data/example.sample")
     ...    .annotate_samples_expr("sa.isCase = pcoin(0.5)")
     ...    .annotate_variants_expr(["va.infoScore.case = gs.filter(g => sa.isCase).map(g => g.GP).infoScore()",
     ...                             "va.infoScore.control = gs.filter(g => !sa.isCase).map(g => g.GP).infoScore()"]))
@@ -2620,6 +2658,7 @@ object FunctionRegistry {
   registerMethod("toInt64", (s: String) => s.toLong, "Convert value to a 64-bit integer.")
   registerMethod("toFloat32", (s: String) => s.toFloat, "Convert value to a 32-bit floating point number.")
   registerMethod("toFloat64", (s: String) => s.toDouble, "Convert value to a 64-bit floating point number.")
+  registerMethod("toBoolean", (s: String) => s.toBoolean, "Convert value to a boolean.")
 
   registerMethod("toInt32", (b: Boolean) => b.toInt, "Convert value to a 32-bit integer. Returns 1 if true, else 0.")
   registerMethod("toInt64", (b: Boolean) => b.toLong, "Convert value to a 64-bit integer. Returns 1 if true, else 0.")
@@ -2647,9 +2686,9 @@ object FunctionRegistry {
 
   registerNumeric("**", (x: Double, y: Double) => math.pow(x, y))
 
-  registerNumericCode("/", (x: Code[java.lang.Integer], y: Code[java.lang.Integer]) => Code.boxDouble(Code.intValue(x).toD / Code.intValue(y).toD))
-  registerNumericCode("/", (x: Code[java.lang.Long], y: Code[java.lang.Long]) => Code.boxDouble(Code.longValue(x).toD / Code.longValue(y).toD))
-  registerNumericCode("/", (x: Code[java.lang.Float], y: Code[java.lang.Float]) => Code.boxDouble(Code.floatValue(x).toD / Code.floatValue(y).toD))
+  registerNumericCode("/", (x: Code[java.lang.Integer], y: Code[java.lang.Integer]) => Code.boxFloat(Code.intValue(x).toF / Code.intValue(y).toF))
+  registerNumericCode("/", (x: Code[java.lang.Long], y: Code[java.lang.Long]) => Code.boxFloat(Code.longValue(x).toF / Code.longValue(y).toF))
+  registerNumericCode("/", (x: Code[java.lang.Float], y: Code[java.lang.Float]) => Code.boxFloat(Code.floatValue(x) / Code.floatValue(y)))
   registerNumericCode("/", (x: Code[java.lang.Double], y: Code[java.lang.Double]) => Code.boxDouble(Code.doubleValue(x).toD / Code.doubleValue(y).toD))
 
   registerNumericCode("+", (x: Code[java.lang.Integer], y: Code[java.lang.Integer]) => Code.boxInt(Code.intValue(x) + Code.intValue(y)))
@@ -2665,38 +2704,40 @@ object FunctionRegistry {
   register("==", (a: Any, b: Any) => a == b, null)(TTHr, TUHr, boolHr)
   register("!=", (a: Any, b: Any) => a != b, null)(TTHr, TUHr, boolHr)
 
-  def registerOrderedType[T]()(implicit ord: Ordering[T], hrt: HailRep[T]) {
-    val hrboxedt = new HailRep[Any] {
+  def registerOrderedType[T]()(implicit hrt: HailRep[T]) {
+    val ord = hrt.typ.ordering
+
+    implicit val hrboxedt = new HailRep[Any] {
       def typ: Type = hrt.typ
     }
 
-    def extOrd(ascending: Boolean): Ordering[Any] = {
-      val dirOrd = if (ascending) ord else ord.reverse
-      extendOrderingToNull(missingGreatest = true)(
-        new Ordering[Any] {
-          def compare(a: Any, b: Any): Int = dirOrd.compare(a.asInstanceOf[T], b.asInstanceOf[T])
-        })
-    }
-
     // register("<", ord.lt _, null)
-    register("<=", ord.lteq _, null)
+    register("<=", (x: Any, y: Any) => ord.lteq(x, y), null)
     // register(">", ord.gt _, null)
-    register(">=", ord.gteq _, null)
+    register(">=", (x: Any, y: Any) => ord.gteq(x, y), null)
 
-    registerMethod("min", ord.min _, "Returns the minimum value.")
-    registerMethod("max", ord.max _, "Returns the maximum value.")
+    registerMethod("min", (x: Any, y: Any) => ord.min(x, y), "Returns the minimum value.")
+    registerMethod("max", (x: Any, y: Any) => ord.max(x, y), "Returns the maximum value.")
 
-    registerMethod("sort", (a: IndexedSeq[Any]) => a.sorted(extOrd(ascending = true)), "Sort the collection in ascending order.")(arrayHr(hrboxedt), arrayHr(hrboxedt))
+    registerMethod("sort", (a: IndexedSeq[Any]) => a.sorted(ord.toOrdering), "Sort the collection in ascending order.")(arrayHr(hrboxedt), arrayHr(hrboxedt))
     registerMethod("sort", (a: IndexedSeq[Any], ascending: Boolean) =>
-      a.sorted(extOrd(ascending)), "Sort the collection with the ordering specified by ``ascending``.", "ascending" -> "If true, sort the collection in ascending order. Otherwise, sort in descending order."
+      a.sorted(
+        (if (ascending)
+           ord
+         else
+           ord.reverse).toOrdering), "Sort the collection with the ordering specified by ``ascending``.", "ascending" -> "If true, sort the collection in ascending order. Otherwise, sort in descending order."
     )(arrayHr(hrboxedt), boolHr, arrayHr(hrboxedt))
 
     registerLambdaMethod("sortBy", (a: IndexedSeq[Any], f: (Any) => Any) =>
-      a.sortBy(f)(extOrd(ascending = true)), "Sort the collection in ascending order after evaluating ``f`` for each element.", "f" -> "Lambda expression."
+      a.sortBy(f)(ord.toOrdering), "Sort the collection in ascending order after evaluating ``f`` for each element.", "f" -> "Lambda expression."
     )(arrayHr(TTHr), unaryHr(TTHr, hrboxedt), arrayHr(TTHr))
 
     registerLambdaMethod("sortBy", (a: IndexedSeq[Any], f: (Any) => Any, ascending: Boolean) =>
-      a.sortBy(f)(extOrd(ascending)), "Sort the collection with the ordering specified by ``ascending`` after evaluating ``f`` for each element.",
+      a.sortBy(f)(
+        (if (ascending)
+           ord
+         else
+           ord.reverse).toOrdering), "Sort the collection with the ordering specified by ``ascending`` after evaluating ``f`` for each element.",
       "f" -> "Lambda expression.", "ascending" -> "If true, sort the collection in ascending order. Otherwise, sort in descending order."
     )(arrayHr(TTHr), unaryHr(TTHr, hrboxedt), boolHr, arrayHr(TTHr))
   }
@@ -2727,6 +2768,178 @@ object FunctionRegistry {
   register("//", (x: Float, y: Float) => math.floor(x / y).toFloat, null)
   register("//", (x: Double, y: Double) => math.floor(x / y), null)
 
+  register("//", { (xs: IndexedSeq[java.lang.Integer], y: Int) =>
+    val a = new Array[java.lang.Integer](xs.length)
+    var i = 0
+    while (i < a.length) {
+      val x = xs(i)
+      if (x != null)
+        a(i) = java.lang.Math.floorDiv(x, y)
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Integer]
+  }, null)(arrayHr(boxedInt32Hr), int32Hr, arrayHr(boxedInt32Hr))
+
+  register("//", { (x: Int, ys: IndexedSeq[java.lang.Integer]) =>
+    val a = new Array[java.lang.Integer](ys.length)
+    var i = 0
+    while (i < a.length) {
+      val y = ys(i)
+      if (y != null)
+        a(i) = java.lang.Math.floorDiv(x, y)
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Integer]
+  }, null)(int32Hr, arrayHr(boxedInt32Hr), arrayHr(boxedInt32Hr))
+
+  register("//", { (xs: IndexedSeq[java.lang.Integer], ys: IndexedSeq[java.lang.Integer]) =>
+    if (xs.length != ys.length)
+      fatal(
+        s"""Cannot apply operation '//' to arrays of unequal length:
+           |  Left: ${ xs.length } elements, [${ xs.mkString(", ") }]
+           |  Right: ${ ys.length } elements [${ ys.mkString(", ") }]""".stripMargin)
+
+    val a = new Array[java.lang.Integer](xs.length)
+    var i = 0
+    while (i < a.length) {
+      val x = xs(i)
+      val y = ys(i)
+      if (x != null && y != null)
+      a(i) = java.lang.Math.floorDiv(xs(i), ys(i))
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Integer]
+  }, null)(arrayHr(boxedInt32Hr), arrayHr(boxedInt32Hr), arrayHr(boxedInt32Hr))
+
+  register("//", { (xs: IndexedSeq[java.lang.Long], y: Long) =>
+    val a = new Array[java.lang.Long](xs.length)
+    var i = 0
+    while (i < a.length) {
+      val x = xs(i)
+      if (x != null)
+        a(i) = java.lang.Math.floorDiv(x, y)
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Long]
+  }, null)(arrayHr(boxedInt64Hr), int64Hr, arrayHr(boxedInt64Hr))
+
+  register("//", { (x: Long, ys: IndexedSeq[java.lang.Long]) =>
+    val a = new Array[java.lang.Long](ys.length)
+    var i = 0
+    while (i < a.length) {
+      val y = ys(i)
+      if (y != null)
+        a(i) = java.lang.Math.floorDiv(x, y)
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Long]
+  }, null)(int64Hr, arrayHr(boxedInt64Hr), arrayHr(boxedInt64Hr))
+
+  register("//", { (xs: IndexedSeq[java.lang.Long], ys: IndexedSeq[java.lang.Long]) =>
+    if (xs.length != ys.length)
+      fatal(
+        s"""Cannot apply operation '//' to arrays of unequal length:
+           |  Left: ${ xs.length } elements, [${ xs.mkString(", ") }]
+           |  Right: ${ ys.length } elements [${ ys.mkString(", ") }]""".stripMargin)
+
+    val a = new Array[java.lang.Long](xs.length)
+    var i = 0
+    while (i < a.length) {
+      val x = xs(i)
+      val y = ys(i)
+      if (x != null && y != null)
+        a(i) = java.lang.Math.floorDiv(xs(i), ys(i))
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Long]
+  }, null)(arrayHr(boxedInt64Hr), arrayHr(boxedInt64Hr), arrayHr(boxedInt64Hr))
+
+  register("//", { (xs: IndexedSeq[java.lang.Float], y: Float) =>
+    val a = new Array[java.lang.Float](xs.length)
+    var i = 0
+    while (i < a.length) {
+      val x = xs(i)
+      if (x != null)
+        a(i) = java.lang.Math.floor(x / y).toFloat
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Float]
+  }, null)(arrayHr(boxedFloat32Hr), float32Hr, arrayHr(boxedFloat32Hr))
+
+  register("//", { (x: Float, ys: IndexedSeq[java.lang.Float]) =>
+    val a = new Array[java.lang.Float](ys.length)
+    var i = 0
+    while (i < a.length) {
+      val y = ys(i)
+      if (y != null)
+        a(i) = java.lang.Math.floor(x / y).toFloat
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Float]
+  }, null)(float32Hr, arrayHr(boxedFloat32Hr), arrayHr(boxedFloat32Hr))
+
+  register("//", { (xs: IndexedSeq[java.lang.Float], ys: IndexedSeq[java.lang.Float]) =>
+    if (xs.length != ys.length)
+      fatal(
+        s"""Cannot apply operation '//' to arrays of unequal length:
+           |  Left: ${ xs.length } elements, [${ xs.mkString(", ") }]
+           |  Right: ${ ys.length } elements [${ ys.mkString(", ") }]""".stripMargin)
+
+    val a = new Array[java.lang.Float](xs.length)
+    var i = 0
+    while (i < a.length) {
+      val x = xs(i)
+      val y = ys(i)
+      if (x != null && y != null)
+        a(i) = java.lang.Math.floor(x / y).toFloat
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Float]
+  }, null)(arrayHr(boxedFloat32Hr), arrayHr(boxedFloat32Hr), arrayHr(boxedFloat32Hr))
+
+  register("//", { (xs: IndexedSeq[java.lang.Double], y: Double) =>
+    val a = new Array[java.lang.Double](xs.length)
+    var i = 0
+    while (i < a.length) {
+      val x = xs(i)
+      if (x != null)
+        a(i) = java.lang.Math.floor(x / y)
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Double]
+  }, null)(arrayHr(boxedFloat64Hr), float64Hr, arrayHr(boxedFloat64Hr))
+
+  register("//", { (x: Double, ys: IndexedSeq[java.lang.Double]) =>
+    val a = new Array[java.lang.Double](ys.length)
+    var i = 0
+    while (i < a.length) {
+      val y = ys(i)
+      if (y != null)
+        a(i) = java.lang.Math.floor(x / y)
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Double]
+  }, null)(float64Hr, arrayHr(boxedFloat64Hr), arrayHr(boxedFloat64Hr))
+
+  register("//", { (xs: IndexedSeq[java.lang.Double], ys: IndexedSeq[java.lang.Double]) =>
+    if (xs.length != ys.length)
+      fatal(
+        s"""Cannot apply operation '//' to arrays of unequal length:
+           |  Left: ${ xs.length } elements, [${ xs.mkString(", ") }]
+           |  Right: ${ ys.length } elements [${ ys.mkString(", ") }]""".stripMargin)
+
+    val a = new Array[java.lang.Double](xs.length)
+    var i = 0
+    while (i < a.length) {
+      val x = xs(i)
+      val y = ys(i)
+      if (x != null && y != null)
+        a(i) = java.lang.Math.floor(x / y)
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Double]
+  }, null)(arrayHr(boxedFloat64Hr), arrayHr(boxedFloat64Hr), arrayHr(boxedFloat64Hr))
+  
   register("%", (x: Int, y: Int) => java.lang.Math.floorMod(x, y), null)
   register("%", (x: Long, y: Long) => java.lang.Math.floorMod(x, y), null)
   register("%", (x: Float, y: Float) => {
@@ -2737,6 +2950,208 @@ object FunctionRegistry {
     val t = x % y
     if (x >= 0 && y > 0 || x <= 0 && y < 0 || t == 0) t else t + y
   }, null)
+
+  register("%", { (xs: IndexedSeq[java.lang.Integer], y: Int) =>
+    val a = new Array[java.lang.Integer](xs.length)
+    var i = 0
+    while (i < a.length) {
+      val x = xs(i)
+      if (x != null)
+        a(i) = java.lang.Math.floorMod(x, y)
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Integer]
+  }, null)(arrayHr(boxedInt32Hr), int32Hr, arrayHr(boxedInt32Hr))
+
+  register("%", { (x: Int, ys: IndexedSeq[java.lang.Integer]) =>
+    val a = new Array[java.lang.Integer](ys.length)
+    var i = 0
+    while (i < a.length) {
+      val y = ys(i)
+      if (y != null)
+        a(i) = java.lang.Math.floorMod(x, y)
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Integer]
+  }, null)(int32Hr, arrayHr(boxedInt32Hr), arrayHr(boxedInt32Hr))
+
+  register("%", { (xs: IndexedSeq[java.lang.Integer], ys: IndexedSeq[java.lang.Integer]) =>
+    if (xs.length != ys.length)
+      fatal(
+        s"""Cannot apply operation '%' to arrays of unequal length:
+           |  Left: ${ xs.length } elements, [${ xs.mkString(", ") }]
+           |  Right: ${ ys.length } elements [${ ys.mkString(", ") }]""".stripMargin)
+
+    val a = new Array[java.lang.Integer](xs.length)
+    var i = 0
+    while (i < a.length) {
+      val x = xs(i)
+      val y = ys(i)
+      if (x != null && y != null)
+        a(i) = java.lang.Math.floorMod(xs(i), ys(i))
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Integer]
+  }, null)(arrayHr(boxedInt32Hr), arrayHr(boxedInt32Hr), arrayHr(boxedInt32Hr))
+
+  register("%", { (xs: IndexedSeq[java.lang.Long], y: Long) =>
+    val a = new Array[java.lang.Long](xs.length)
+    var i = 0
+    while (i < a.length) {
+      val x = xs(i)
+      if (x != null)
+        a(i) = java.lang.Math.floorMod(x, y)
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Long]
+  }, null)(arrayHr(boxedInt64Hr), int64Hr, arrayHr(boxedInt64Hr))
+
+  register("%", { (x: Long, ys: IndexedSeq[java.lang.Long]) =>
+    val a = new Array[java.lang.Long](ys.length)
+    var i = 0
+    while (i < a.length) {
+      val y = ys(i)
+      if (y != null)
+        a(i) = java.lang.Math.floorMod(x, y)
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Long]
+  }, null)(int64Hr, arrayHr(boxedInt64Hr), arrayHr(boxedInt64Hr))
+
+  register("%", { (xs: IndexedSeq[java.lang.Long], ys: IndexedSeq[java.lang.Long]) =>
+    if (xs.length != ys.length)
+      fatal(
+        s"""Cannot apply operation '%' to arrays of unequal length:
+           |  Left: ${ xs.length } elements, [${ xs.mkString(", ") }]
+           |  Right: ${ ys.length } elements [${ ys.mkString(", ") }]""".stripMargin)
+
+    val a = new Array[java.lang.Long](xs.length)
+    var i = 0
+    while (i < a.length) {
+      val x = xs(i)
+      val y = ys(i)
+      if (x != null && y != null)
+        a(i) = java.lang.Math.floorMod(xs(i), ys(i))
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Long]
+  }, null)(arrayHr(boxedInt64Hr), arrayHr(boxedInt64Hr), arrayHr(boxedInt64Hr))
+
+  register("%", { (xs: IndexedSeq[java.lang.Float], y: Float) =>
+    val a = new Array[java.lang.Float](xs.length)
+    var i = 0
+    while (i < a.length) {
+      val x = xs(i)
+      if (x != null) {
+        val t = x % y
+        if (x >= 0 && y > 0 || x <= 0 && y < 0 || t == 0)
+          a(i) = t
+        else
+          a(i) = t + y
+      }
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Float]
+  }, null)(arrayHr(boxedFloat32Hr), float32Hr, arrayHr(boxedFloat32Hr))
+
+  register("%", { (x: Float, ys: IndexedSeq[java.lang.Float]) =>
+    val a = new Array[java.lang.Float](ys.length)
+    var i = 0
+    while (i < a.length) {
+      val y = ys(i)
+      if (y != null) {
+        val t = x % y
+        if (x >= 0 && y > 0 || x <= 0 && y < 0 || t == 0)
+          a(i) = t
+        else
+          a(i) = t + y
+      }
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Float]
+  }, null)(float32Hr, arrayHr(boxedFloat32Hr), arrayHr(boxedFloat32Hr))
+
+  register("%", { (xs: IndexedSeq[java.lang.Float], ys: IndexedSeq[java.lang.Float]) =>
+    if (xs.length != ys.length)
+      fatal(
+        s"""Cannot apply operation '%' to arrays of unequal length:
+           |  Left: ${ xs.length } elements, [${ xs.mkString(", ") }]
+           |  Right: ${ ys.length } elements [${ ys.mkString(", ") }]""".stripMargin)
+
+    val a = new Array[java.lang.Float](xs.length)
+    var i = 0
+    while (i < a.length) {
+      val x = xs(i)
+      val y = ys(i)
+      if (x != null && y != null) {
+        val t = x % y
+        if (x >= 0 && y > 0 || x <= 0 && y < 0 || t == 0)
+          a(i) = t
+        else
+          a(i) = t + y
+      }
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Float]
+  }, null)(arrayHr(boxedFloat32Hr), arrayHr(boxedFloat32Hr), arrayHr(boxedFloat32Hr))
+
+  register("%", { (xs: IndexedSeq[java.lang.Double], y: Double) =>
+    val a = new Array[java.lang.Double](xs.length)
+    var i = 0
+    while (i < a.length) {
+      val x = xs(i)
+      if (x != null) {
+        val t = x % y
+        if (x >= 0 && y > 0 || x <= 0 && y < 0 || t == 0)
+          a(i) = t
+        else
+          a(i) = t + y
+      }
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Double]
+  }, null)(arrayHr(boxedFloat64Hr), float64Hr, arrayHr(boxedFloat64Hr))
+
+  register("%", { (x: Double, ys: IndexedSeq[java.lang.Double]) =>
+    val a = new Array[java.lang.Double](ys.length)
+    var i = 0
+    while (i < a.length) {
+      val y = ys(i)
+      if (y != null) {
+        val t = x % y
+        if (x >= 0 && y > 0 || x <= 0 && y < 0 || t == 0)
+          a(i) = t
+        else
+          a(i) = t + y
+      }
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Double]
+  }, null)(float64Hr, arrayHr(boxedFloat64Hr), arrayHr(boxedFloat64Hr))
+
+  register("%", { (xs: IndexedSeq[java.lang.Double], ys: IndexedSeq[java.lang.Double]) =>
+    if (xs.length != ys.length)
+      fatal(
+        s"""Cannot apply operation '%' to arrays of unequal length:
+           |  Left: ${ xs.length } elements, [${ xs.mkString(", ") }]
+           |  Right: ${ ys.length } elements [${ ys.mkString(", ") }]""".stripMargin)
+
+    val a = new Array[java.lang.Double](xs.length)
+    var i = 0
+    while (i < a.length) {
+      val x = xs(i)
+      val y = ys(i)
+      if (x != null && y != null) {
+        val t = x % y
+        if (x >= 0 && y > 0 || x <= 0 && y < 0 || t == 0)
+          a(i) = t
+        else
+          a(i) = t + y
+      }
+      i += 1
+    }
+    a: IndexedSeq[java.lang.Double]
+  }, null)(arrayHr(boxedFloat64Hr), arrayHr(boxedFloat64Hr), arrayHr(boxedFloat64Hr))
 
   register("+", (x: String, y: Any) => x + y, null)(stringHr, TTHr, stringHr)
 

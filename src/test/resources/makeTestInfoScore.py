@@ -1,8 +1,12 @@
 #! /usr/bin/python
 
+from __future__ import absolute_import
+from __future__ import print_function
 import sys
 import os
 import random
+from six.moves import range
+from six.moves import zip
 
 seed = sys.argv[1]
 nSamples = int(sys.argv[2])
@@ -107,7 +111,7 @@ def transformDosage(dx):
         l1 = int((w0 + w1) * 32768 / sumDx + 0.5) - l0
         l2 = 32768 - l0 - l1
     except:
-        print dx
+        print(dx)
         sys.exit()
     return [l0 / 32768.0, l1 / 32768.0, l2 / 32768.0]
 
@@ -128,7 +132,7 @@ def calcInfoScore(gps):
             altAllele += (dxt[1] + 2 *dxt[2])
             totalDosage += sum(dxt)
 
-    z = zip(e, f)
+    z = list(zip(e, f))
     z = [fi - ei * ei for (ei, fi) in z]
 
     if totalDosage == 0.0:

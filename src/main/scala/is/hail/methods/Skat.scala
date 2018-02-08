@@ -3,6 +3,7 @@ package is.hail.methods
 import is.hail.utils._
 import is.hail.variant._
 import is.hail.expr._
+import is.hail.expr.types._
 import is.hail.table.Table
 import is.hail.stats.{LogisticRegressionModel, RegressionUtils, eigSymD}
 import is.hail.annotations.{Annotation, UnsafeRow}
@@ -12,6 +13,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.Row
 import com.sun.jna.Native
 import com.sun.jna.ptr.IntByReference
+import is.hail.expr.types.TStruct
 
 /*
 Skat implements the burden test described in:
@@ -83,7 +85,7 @@ object Skat {
     val d = n - k
 
     if (d < 1)
-      fatal(s"$n samples and $k ${ plural(k, "covariate") } including intercept implies $d degrees of freedom.")    
+      fatal(s"$n samples and $k ${ plural(k, "covariate") } (including intercept) implies $d degrees of freedom.")    
     if (logistic) {
       val badVals = y.findAll(yi => yi != 0d && yi != 1d)
       if (badVals.nonEmpty)
@@ -218,7 +220,7 @@ object Skat {
     val localGlobalAnnotationBc = sc.broadcast(vsm.globalAnnotation)
     val sampleIdsBc = vsm.sampleIdsBc
     val sampleAnnotationsBc = vsm.sampleAnnotationsBc
-    val localRowType = vsm.rowType
+    val localRowType = vsm.rvRowType
 
     val completeSampleIndexBc = sc.broadcast(completeSampleIndex)
 

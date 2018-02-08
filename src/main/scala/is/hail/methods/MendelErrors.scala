@@ -1,8 +1,7 @@
 package is.hail.methods
 
 import is.hail.HailContext
-import is.hail.annotations.Annotation
-import is.hail.expr.{TInt32, TString, TStruct, Type}
+import is.hail.expr.types._
 import is.hail.table.Table
 import is.hail.utils._
 import is.hail.variant.CopyState._
@@ -24,13 +23,13 @@ case class MendelError(variant: Variant, trio: CompleteTrio, code: Int,
     else
       "./."
 
-  def implicatedSamplesWithCounts: Iterator[(String, (Int, Int))] = {
+  def implicatedSamplesWithCounts: Iterator[(String, (Long, Long))] = {
     if (code == 2 || code == 1) Iterator(trio.kid, trio.knownDad, trio.knownMom)
     else if (code == 6 || code == 3 || code == 11 || code == 12) Iterator(trio.kid, trio.knownDad)
     else if (code == 4 || code == 7 || code == 9 || code == 10) Iterator(trio.kid, trio.knownMom)
     else Iterator(trio.kid)
   }
-    .map((_, (1, if (variant.altAllele.isSNP) 1 else 0)))
+    .map((_, (1L, if (variant.altAllele.isSNP) 1L else 0L)))
 
   def toLineMendel(sampleIds: IndexedSeq[String]): String = {
     val v = variant
@@ -39,7 +38,8 @@ case class MendelError(variant: Variant, trio: CompleteTrio, code: Int,
       v.contig + ":" + v.start + ":" + v.ref + ":" + v.alt + "\t" + code + "\t" + errorString
   }
 
-  def errorString = gtString(variant, gtDad) + " x " + gtString(variant, gtMom) + " -> " + gtString(variant, gtKid)
+  def errorString: String =
+    gtString(variant, gtDad) + " x " + gtString(variant, gtMom) + " -> " + gtString(variant, gtKid)
 }
 
 object MendelErrors {
@@ -73,7 +73,7 @@ object MendelErrors {
       warn(s"$nSamplesDiscarded ${ plural(nSamplesDiscarded, "sample") } discarded from .fam: sex of child is missing.")
 
     val trioMatrix = vds.trioMatrix(Pedigree(trios), completeTrios = true)
-    val rowType = trioMatrix.rowType
+    val rowType = trioMatrix.rvRowType
     val nTrios = trioMatrix.nSamples
 
     val sc = vds.sparkContext
@@ -128,17 +128,17 @@ case class MendelErrors(hc: HailContext, vSig: Type, trios: IndexedSeq[CompleteT
       .reduceByKey((x, y) => (x._1 + y._1, x._2 + y._2))
   }
 
-  def nErrorPerIndiv: RDD[(String, (Int, Int))] = {
+  def nErrorPerIndiv: RDD[(String, (Long, Long))] = {
     val indivRDD = sc.parallelize(trios.flatMap(t => Iterator(t.kid, t.knownDad, t.knownMom)).distinct)
     mendelErrors
       .flatMap(_.implicatedSamplesWithCounts)
-      .union(indivRDD.map((_, (0, 0))))
+      .union(indivRDD.map((_, (0L, 0L))))
       .reduceByKey((x, y) => (x._1 + y._1, x._2 + y._2))
   }
 
   def mendelKT(): Table = {
     val signature = TStruct(
-      "fid" -> TString(),
+      "fam_id" -> TString(),
       "s" -> TString(),
       "v" -> vSig,
       "code" -> TInt32(),
@@ -151,12 +151,12 @@ case class MendelErrors(hc: HailContext, vSig: Type, trios: IndexedSeq[CompleteT
 
   def fMendelKT(): Table = {
     val signature = TStruct(
-      "fid" -> TString(),
-      "father" -> TString(),
-      "mother" -> TString(),
-      "nChildren" -> TInt32(),
-      "nErrors" -> TInt32(),
-      "nSNP" -> TInt32()
+      "fam_id" -> TString(),
+      "pat_id" -> TString(),
+      "mat_id" -> TString(),
+      "children" -> TInt32(),
+      "errors" -> TInt32(),
+      "snp_errors" -> TInt32()
     )
 
     val trioFamBc = sc.broadcast(trioFam)
@@ -168,16 +168,16 @@ case class MendelErrors(hc: HailContext, vSig: Type, trios: IndexedSeq[CompleteT
       Row(kids.flatMap(x => trioFamBc.value.get(x.head)).orNull, dad, mom, kids.map(_.length).getOrElse(0), n, nSNP)
     }
 
-    Table(hc, rdd, signature, Array("fid"))
+    Table(hc, rdd, signature, Array("pat_id", "mat_id"))
   }
 
   def iMendelKT(): Table = {
 
     val signature = TStruct(
-      "fid" -> TString(),
+      "fam_id" -> TString(),
       "s" -> TString(),
-      "nError" -> TInt32(),
-      "nSNP" -> TInt32()
+      "errors" -> TInt64(),
+      "snp_errors" -> TInt64()
     )
 
     val trioFamBc = sc.broadcast(trios.iterator.flatMap { t =>
@@ -194,7 +194,7 @@ case class MendelErrors(hc: HailContext, vSig: Type, trios: IndexedSeq[CompleteT
   def lMendelKT(): Table = {
     val signature = TStruct(
       "v" -> vSig,
-      "nError" -> TInt32()
+      "errors" -> TInt32()
     )
 
     val rdd = nErrorPerVariant.map { case (v, l) => Row(v, l.toInt) }

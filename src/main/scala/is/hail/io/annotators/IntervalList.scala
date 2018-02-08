@@ -1,7 +1,7 @@
 package is.hail.io.annotators
 
 import is.hail.HailContext
-import is.hail.expr._
+import is.hail.expr.types._
 import is.hail.table.Table
 import is.hail.utils.{Interval, _}
 import is.hail.variant._
@@ -33,11 +33,11 @@ object IntervalList {
     }
 
     val schema = if (hasValue)
-      TStruct("interval" -> TInterval(gr), "target" -> TString())
+      TStruct("interval" -> TInterval(TLocus(gr)), "target" -> TString())
     else
-      TStruct("interval" -> TInterval(gr))
+      TStruct("interval" -> TInterval(TLocus(gr)))
 
-    implicit val locusOrd = gr.locusOrdering
+    implicit val ord = gr.locusType.ordering
 
     val rdd = hc.sc.textFileLines(filename)
       .filter(l => !l.value.isEmpty && l.value(0) != '@')

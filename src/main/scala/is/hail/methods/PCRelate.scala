@@ -4,7 +4,7 @@ import breeze.linalg.{*, DenseMatrix}
 import is.hail.annotations.{Annotation, UnsafeRow}
 import is.hail.distributedmatrix.BlockMatrix
 import is.hail.distributedmatrix.BlockMatrix.ops._
-import is.hail.expr.{TFloat64, TString, TStruct}
+import is.hail.expr.types._
 import is.hail.table.Table
 import is.hail.utils._
 import is.hail.variant.{HardCallView, MatrixTable, Variant}
@@ -102,7 +102,7 @@ object PCRelate {
 
   private val k0cutoff = math.pow(2.0, -5.0 / 2.0)
 
-  private def prependConstantColumn(k: Double, m: DenseMatrix[Double]): DenseMatrix[Double] = {    
+  private def prependConstantColumn(k: Double, m: DenseMatrix[Double]): DenseMatrix[Double] = {
     val result = new Array[Double](m.rows * (m.cols + 1))
     var i = 0
     while (i < m.rows) {
@@ -110,19 +110,20 @@ object PCRelate {
       i += 1
     }
     System.arraycopy(m.toArray, 0, result, m.rows, m.rows * m.cols)
-    
+
     new DenseMatrix(m.rows, m.cols + 1, result)
   }
 
   def vdsToMeanImputedMatrix(vds: MatrixTable): IndexedRowMatrix = {
     val nSamples = vds.nSamples
-    val variants = vds.variants.collect()
-    val variantIdxBc = vds.sparkContext.broadcast(variants.index)
-    val localRowType = vds.rowType
-    val rdd = vds.rdd2.mapPartitions { it =>
+    val localRowType = vds.rvRowType
+    val partStarts = vds.partitionStarts()
+    val partStartsBc = vds.sparkContext.broadcast(partStarts)
+    val rdd = vds.rdd2.mapPartitionsWithIndex { case (partIdx, it) =>
       val view = HardCallView(localRowType)
       val missingIndices = new ArrayBuilder[Int]()
 
+      var rowIdx = partStartsBc.value(partIdx)
       it.map { rv =>
         val v = Variant.fromRegionValue(rv.region,
           localRowType.loadField(rv, 1))
@@ -153,10 +154,12 @@ object PCRelate {
           i += 1
         }
 
-        IndexedRow(variantIdxBc.value(v), Vectors.dense(a))
+        rowIdx += 1
+        IndexedRow(rowIdx - 1, Vectors.dense(a))
       }
     }
-    new IndexedRowMatrix(rdd.cache(), variants.length, nSamples)
+
+    new IndexedRowMatrix(rdd.cache(), partStarts.last, nSamples)
   }
 
   /**
@@ -251,7 +254,7 @@ class PCRelate(maf: Double, blockSize: Int) extends Serializable {
       else
         g - mu * 2.0
     } (g, mu)
-    
+
     val stddev = variance.map(math.sqrt)
 
     (gram(centeredG) :/ gram(stddev)) / 4.0
@@ -262,12 +265,12 @@ class PCRelate(maf: Double, blockSize: Int) extends Serializable {
       BlockMatrix.map2 { (g, mu) =>
         if (badgt(g) || badmu(mu) || g != 2.0) 0.0 else 1.0
       } (g, mu).cache()
-    
+
     val homref =
       BlockMatrix.map2 { (g, mu) =>
         if (badgt(g) || badmu(mu) || g != 0.0) 0.0 else 1.0
       } (g, mu).cache()
-    
+
     (homalt.t * homref) :+ (homref.t * homalt)
   }
 
@@ -296,7 +299,7 @@ class PCRelate(maf: Double, blockSize: Int) extends Serializable {
         else
           mu * mu
       } (g, mu).cache()
-    
+
     val oneMinusMu2 =
       BlockMatrix.map2 { (g, mu) =>
         if (badgt(g) || badmu(mu))
@@ -304,7 +307,7 @@ class PCRelate(maf: Double, blockSize: Int) extends Serializable {
         else
           (1.0 - mu) * (1.0 - mu)
       } (g, mu).cache()
-    
+
     val denom = (mu2.t * oneMinusMu2) :+ (oneMinusMu2.t * mu2)
     BlockMatrix.map4 { (phi: Double, denom: Double, k2: Double, ibs0: Double) =>
       if (phi <= k0cutoff)

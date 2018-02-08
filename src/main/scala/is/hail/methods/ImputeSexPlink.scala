@@ -13,21 +13,21 @@ object ImputeSexPlink {
     var vsm = in
 
     val gr = vsm.genomeReference
-    implicit val locusOrd = gr.locusOrdering
 
-    val xIntervals = IntervalTree(gr.xContigs.map(contig => Interval(Locus(contig, 0), Locus(contig, gr.contigLength(contig)))).toArray)
+    val xIntervals = IntervalTree(gr.locusType.ordering,
+      gr.xContigs.map(contig => Interval(Locus(contig, 0), Locus(contig, gr.contigLength(contig)))).toArray)
     vsm = FilterIntervals(vsm, xIntervals, keep = true)
 
     if (!includePar)
-      vsm = FilterIntervals(vsm, IntervalTree(gr.par), keep = false)
+      vsm = FilterIntervals(vsm, IntervalTree(gr.locusType.ordering, gr.par), keep = false)
 
     vsm = vsm.annotateVariantsExpr(
-      s"va = ${ popFrequencyExpr.getOrElse("gs.map(g => g.GT.nNonRefAlleles).sum() / gs.filter(g => isDefined(g.GT)).count() / 2") }")
+      s"va.AF = ${ popFrequencyExpr.getOrElse("gs.map(g => g.GT.nNonRefAlleles).sum().toFloat64() / gs.filter(g => isDefined(g.GT)).count() / 2") }")
 
     val resultSA = vsm
-      .filterVariantsExpr(s"va > $mafThreshold")
+      .filterVariantsExpr(s"va.AF > $mafThreshold")
       .annotateSamplesExpr(s"""sa =
-let ib = gs.map(g => g.GT).inbreeding(g => va) and
+let ib = gs.map(g => g.GT).inbreeding(g => va.AF) and
     isFemale = if (ib.Fstat < $fFemaleThreshold) true else if (ib.Fstat > $fMaleThreshold) false else NA: Boolean
  in merge({ isFemale: isFemale }, ib)""")
       .samplesKT()

@@ -1,4 +1,5 @@
-import SocketServer
+from __future__ import absolute_import
+import six.moves.socketserver
 import socket
 import sys
 from threading import Thread
@@ -6,7 +7,8 @@ from threading import Thread
 import py4j
 from pyspark.sql.utils import CapturedException
 from decorator import decorator
-from hail.py3_compat import *
+import numpy as np
+import six
 
 
 class FatalError(Exception):
@@ -97,12 +99,12 @@ def jset(x):
 
 
 def jindexed_seq_args(x):
-    args = [x] if isinstance(x, str) or isinstance(x, unicode) else x
+    args = [x] if isinstance(x, str) or isinstance(x, six.text_type) else x
     return jindexed_seq(args)
 
 
 def jset_args(x):
-    args = [x] if isinstance(x, str) or isinstance(x, unicode) else x
+    args = [x] if isinstance(x, str) or isinstance(x, six.text_type) else x
     return jset(args)
 
 
@@ -116,14 +118,33 @@ def jiterable_to_list(it):
 def jarray_to_list(a):
     return list(a) if a else None
 
+def numpy_from_breeze(bdm):
+    isT = bdm.isTranspose()
+    rows, cols = bdm.rows(), bdm.cols()
+    entries = rows * cols
 
-def plural(orig, n, alternate=None):
-    if n == 1:
-        return orig
-    elif alternate:
-        return alternate
+    if bdm.offset() != 0:
+        raise ValueError("Expected offset of Breeze matrix to be 0, found {}"
+                         .format(bdm.offset()))
+    expected_stride = cols if isT else rows
+    if bdm.majorStride() != expected_stride:
+        raise ValueError("Expected major stride of Breeze matrix to be {}, found {}"
+                         .format(expected_stride, bdm.majorStride()))
+    if entries > 0x7fffffff:
+        raise ValueError("rows * cols must be smaller than {}, found {} by {} matrix"
+                         .format(0x7fffffff, rows, cols))
+
+    if entries <= 0x100000:
+        b = Env.jutils().bdmGetBytes(bdm, 0, entries)
     else:
-        return orig + 's'
+        b = bytearray()
+        i = 0
+        while (i < entries):
+            n = min(0x100000, entries - i)
+            b.extend(Env.jutils().bdmGetBytes(bdm, i, n))
+            i += n
+    data = np.fromstring(bytes(b), dtype='f8')
+    return np.reshape(data, (cols, rows)).T if bdm.isTranspose else np.reshape(data, (rows, cols))
 
 
 class Log4jLogger:
@@ -169,18 +190,18 @@ def handle_py4j(func, *args, **kwargs):
     return r
 
 
-class LoggingTCPHandler(SocketServer.StreamRequestHandler):
+class LoggingTCPHandler(six.moves.socketserver.StreamRequestHandler):
     def handle(self):
         for line in self.rfile:
             sys.stderr.write(line)
 
 
-class SimpleServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
+class SimpleServer(six.moves.socketserver.ThreadingMixIn, six.moves.socketserver.TCPServer):
     daemon_threads = True
     allow_reuse_address = True
 
     def __init__(self, server_address, handler_class):
-        SocketServer.TCPServer.__init__(self, server_address, handler_class)
+        six.moves.socketserver.TCPServer.__init__(self, server_address, handler_class)
 
 
 def connect_logger(host, port):

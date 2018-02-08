@@ -1,33 +1,33 @@
 package is.hail.methods
 
-import is.hail.annotations.Annotation
-import is.hail.utils.{ArrayBuilder, Interval, IntervalTree}
-import is.hail.variant.{Locus, MatrixTable, Variant}
+import is.hail.expr.types.Type
+import is.hail.utils.{Interval, IntervalTree}
+import is.hail.variant.MatrixTable
+import org.apache.spark.sql.Row
 
 import scala.collection.JavaConverters._
 
 object FilterIntervals {
-  def apply(vsm: MatrixTable, intervals: java.util.ArrayList[Interval[Locus]], keep: Boolean): MatrixTable = {
-    implicit val locusOrd = vsm.genomeReference.locusOrdering
-    val iList = IntervalTree[Locus](intervals.asScala.toArray)
+  def apply(vsm: MatrixTable, intervals: java.util.ArrayList[Interval], keep: Boolean): MatrixTable = {
+    vsm.requireRowKeyVariant("filter_intervals")
+    val iList = IntervalTree(vsm.locusType.ordering, intervals.asScala.toArray)
     apply(vsm, iList, keep)
   }
 
-  def apply[T, U](vsm: MatrixTable, iList: IntervalTree[Locus, U], keep: Boolean): MatrixTable = {
-    implicit val locusOrd = vsm.matrixType.locusType.ordering(missingGreatest = true)
-
-    val ab = new ArrayBuilder[(Interval[Annotation], Annotation)]()
-    iList.foreach { case (i, v) =>
-      ab += (Interval[Annotation](i.start, i.end), v)
-    }
-
-    val iList2 = IntervalTree.annotationTree(ab.result())
-
-    if (keep)
-      vsm.copy(rdd = vsm.rdd.filterIntervals(iList2))
-    else {
-      val iListBc = vsm.sparkContext.broadcast(iList)
-      vsm.filterVariants { (v, va, gs) => !iListBc.value.contains(v.asInstanceOf[Variant].locus) }
+  def apply[U](vsm: MatrixTable, intervals: IntervalTree[U], keep: Boolean): MatrixTable = {
+    if (keep) {
+      val pkIntervals = IntervalTree(
+        vsm.matrixType.orderedRVType.pkType.ordering,
+        intervals.map { case (i, _) =>
+          Interval(Row(i.start), Row(i.end))
+        }.toArray)
+      vsm.copy2(rdd2 = vsm.rdd2.filterIntervals(pkIntervals))
+    } else {
+      val intervalsBc = vsm.sparkContext.broadcast(intervals)
+      val (t, p) = Type.partitionKeyProjection(vsm.vSignature)
+      assert(t == vsm.locusType)
+      val localLocusOrdering = vsm.locusType.ordering
+      vsm.filterVariants { (v, va, gs) => !intervalsBc.value.contains(localLocusOrdering, p(v)) }
     }
   }
 }

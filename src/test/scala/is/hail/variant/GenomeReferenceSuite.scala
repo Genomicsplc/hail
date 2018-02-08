@@ -2,10 +2,11 @@ package is.hail.variant
 
 import java.io.FileNotFoundException
 
-import is.hail.expr.{TInterval, TLocus, TStruct, TVariant}
+import is.hail.expr.types.{TInterval, TLocus, TStruct, TVariant}
 import is.hail.table.Table
-import is.hail.utils.Interval
+import is.hail.utils.HailException
 import is.hail.{SparkSuite, TestUtils}
+import org.apache.spark.SparkException
 import org.apache.spark.sql.Row
 import org.testng.annotations.Test
 
@@ -87,13 +88,13 @@ class GenomeReferenceSuite extends SparkSuite {
     GenomeReference.addReference(gr)
 
     val vds = hc.importVCF("src/test/resources/sample.vcf")
-      .annotateVariantsExpr("va.v = NA: Variant(foo), va.l = NA: Locus(foo), va.i = NA: Interval(foo)")
+      .annotateVariantsExpr("va.v = NA: Variant(foo), va.l = NA: Locus(foo), va.i = NA: Interval[Locus(foo)]")
 
     val vas = vds.vaSignature.asInstanceOf[TStruct]
 
     assert(vas.field("v").typ == TVariant(gr))
     assert(vas.field("l").typ == TLocus(gr))
-    assert(vas.field("i").typ == TInterval(gr))
+    assert(vas.field("i").typ == TInterval(TLocus(gr)))
 
     GenomeReference.removeReference("foo")
   }
@@ -148,16 +149,16 @@ class GenomeReferenceSuite extends SparkSuite {
   @Test def testConstructors() {
     val kt = hc.importTable("src/test/resources/sampleAnnotations.tsv")
     val ktann = kt.annotate("""v1 = Variant(GRCh38)("chrX:156030895:A:T"), v2 = Variant(GRCh37)("X:154931044:A:T"),
-    |v3 = Variant(GRCh37)("1", 3, "A", "T"), l1 = Locus(GRCh38)("1", 100), l2 = Locus(GRCh37)("1:100"),
-    |i1 = Interval(GRCh37)("1:5-10"), i2 = Interval(GRCh38)("chrX", 156030890, 156030895)""".stripMargin)
+    |v3 = Variant(GRCh37)("1", 3, "A", "T"), l1 = Locus(GRCh38)("chr1", 100), l2 = Locus(GRCh37)("1:100"),
+    |i1 = LocusInterval(GRCh37)("1:5-10"), i2 = LocusInterval(GRCh38)("chrX", 156030890, 156030895)""".stripMargin)
 
-    assert(ktann.signature.field("v1").typ == GenomeReference.GRCh38.variant &&
-    ktann.signature.field("v2").typ == GenomeReference.GRCh37.variant &&
-    ktann.signature.field("v3").typ == GenomeReference.GRCh37.variant &&
-    ktann.signature.field("l1").typ == GenomeReference.GRCh38.locus &&
-    ktann.signature.field("l2").typ == GenomeReference.GRCh37.locus &&
-    ktann.signature.field("i1").typ == GenomeReference.GRCh37.interval &&
-    ktann.signature.field("i2").typ == GenomeReference.GRCh38.interval)
+    assert(ktann.signature.field("v1").typ == GenomeReference.GRCh38.variantType &&
+    ktann.signature.field("v2").typ == GenomeReference.GRCh37.variantType &&
+    ktann.signature.field("v3").typ == GenomeReference.GRCh37.variantType &&
+    ktann.signature.field("l1").typ == GenomeReference.GRCh38.locusType &&
+    ktann.signature.field("l2").typ == GenomeReference.GRCh37.locusType &&
+    ktann.signature.field("i1").typ == TInterval(GenomeReference.GRCh37.locusType) &&
+    ktann.signature.field("i2").typ == TInterval(GenomeReference.GRCh38.locusType))
 
     assert(ktann.forall("v1.inXPar() && v2.inXPar() && v3.isAutosomal() &&" +
       "l1.position == 100 && l2.position == 100 &&" +
@@ -166,8 +167,25 @@ class GenomeReferenceSuite extends SparkSuite {
     val gr = GenomeReference("foo2", Array("1", "2", "3"), Map("1" -> 5, "2" -> 5, "3" -> 5))
     GenomeReference.addReference(gr)
     GenomeReference.setDefaultReference(gr)
-    assert(kt.annotate("""v1 = Variant("chrX:156030895:A:T")""").signature.field("v1").typ == gr.variant)
-    assert(kt.annotate("""i1 = Interval(Locus(foo2)("1:100"), Locus(foo2)("1:104"))""").signature.field("i1").typ == gr.interval)
+    assert(kt.annotate("""v1 = Variant("chrX:156030895:A:T")""").signature.field("v1").typ == gr.variantType)
+    assert(kt.annotate("""i1 = Interval(Locus(foo2)("1:100"), Locus(foo2)("1:104"))""").signature.field("i1").typ == TInterval(gr.locusType))
+
+    // check for invalid contig names or positions
+    intercept[SparkException](kt.annotate("""v1bad = Variant("foo:1555:A:T") """).collect())
+    intercept[SparkException](kt.annotate("""v1bad = Variant("foo", 1555, "A", "T") """).collect())
+    intercept[SparkException](kt.annotate("""v1bad = Variant("foo", 1555, "A", ["T", "G"]) """).collect())
+    intercept[SparkException](kt.annotate("""v1bad = Variant("MT:17000:A:T") """).collect())
+
+    intercept[SparkException](kt.annotate("""l1bad = Locus("MT:17000") """).collect())
+    intercept[SparkException](kt.annotate("""l1bad = Locus("foo:17000") """).collect())
+    intercept[SparkException](kt.annotate("""l1bad = Locus("foo", 17000) """).collect())
+
+    intercept[SparkException](kt.annotate("""i1bad = LocusInterval("MT:4789-17000") """).collect())
+    intercept[SparkException](kt.annotate("""i1bad = LocusInterval("foo:4789-17000") """).collect())
+    intercept[SparkException](kt.annotate("""i1bad = LocusInterval("foo", 1, 10) """).collect())
+    intercept[SparkException](kt.annotate("""i1bad = LocusInterval("MT", 5, 17000) """).collect())
+
+    intercept[HailException](kt.annotate("""i1bad = Interval(Locus(foo2)("1:100"), Locus(GRCh37)("1:104"))""").collect())
 
     GenomeReference.setDefaultReference(GenomeReference.GRCh37)
     GenomeReference.removeReference("foo2")
@@ -223,13 +241,6 @@ class GenomeReferenceSuite extends SparkSuite {
     assert(gr.compare(l1, l1) == 0)
     assert(gr.compare(l3, l1) > 0)
     assert(gr.compare(l2, l1) > 0)
-
-    // Test intervals
-    implicit val locusOrd = gr.locusOrdering
-    val i1 = Interval(l1, l2)
-    val i2 = Interval(l2, Locus("1", 27000))
-
-    assert(gr.compare(i1, i2) < 0)
   }
 
   @Test def testWriteToFile() {
@@ -247,5 +258,30 @@ class GenomeReferenceSuite extends SparkSuite {
       (gr.parInput sameElements gr2.parInput))
 
     GenomeReference.removeReference("GRCh37_2")
+  }
+
+  @Test def testWriteGR() {
+    val outKT = tmpDir.createTempFile("grWrite", ".kt")
+    val outKT2 = tmpDir.createTempFile("grWrite", ".kt")
+    val outVDS = tmpDir.createTempFile("grWrite", ".vds")
+
+    val kt = hc.importTable("src/test/resources/sampleAnnotations.tsv")
+    val vds = hc.importVCF("src/test/resources/sample.vcf")
+
+    val gr = GenomeReference("foo", Array("1", "2", "3"), Map("1" -> 5, "2" -> 5, "3" -> 5))
+    GenomeReference.addReference(gr)
+    kt.annotate("""v1 = Variant(foo)("1:3:A:T")""").write(outKT)
+    vds.annotateVariantsExpr("""va.v2 = Variant(foo)("1:3:A:T")""").write(outVDS)
+    GenomeReference.removeReference("foo")
+
+    val gr2 = GenomeReference("foo", Array("1"), Map("1" -> 5))
+    GenomeReference.addReference(gr2)
+    kt.annotate("""v1 = Variant(foo)("1:3:A:T")""").write(outKT2)
+    GenomeReference.removeReference("foo")
+
+    assert(hc.readTable(outKT).signature.field("v1").typ == TVariant(gr))
+    assert(hc.read(outVDS).vaSignature.fieldOption("v2").get.typ == TVariant(gr))
+    TestUtils.interceptFatal("`foo' already exists and is not identical to the imported reference from")(hc.readTable(outKT2))
+    GenomeReference.removeReference("foo")
   }
 }

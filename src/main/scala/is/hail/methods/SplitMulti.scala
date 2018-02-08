@@ -2,6 +2,7 @@ package is.hail.methods
 
 import is.hail.annotations._
 import is.hail.expr._
+import is.hail.expr.types._
 import is.hail.rvd.OrderedRVD
 import is.hail.utils._
 import is.hail.variant.{Genotype, Locus, MatrixTable, Variant}
@@ -9,15 +10,15 @@ import org.apache.spark.rdd.RDD
 
 import scala.reflect.ClassTag
 
-class ExprAnnotator(val ec: EvalContext, t: Type, expr: String, head: Option[String]) extends Serializable {
+class ExprAnnotator(val ec: EvalContext, t: TStruct, expr: String, head: Option[String]) extends Serializable {
   private val (paths, types, f) = Parser.parseAnnotationExprs(expr, ec, head)
 
   private val inserters = new Array[Inserter](types.length)
-  val newT: Type = {
+  val newT: TStruct = {
     var newT = t
     var i = 0
     while (i < types.length) {
-      val (newSig, ins) = newT.insert(types(i), paths(i))
+      val (newSig, ins) = newT.structInsert(types(i), paths(i))
       inserters(i) = ins
       newT = newSig
       i += 1
@@ -39,10 +40,10 @@ class ExprAnnotator(val ec: EvalContext, t: Type, expr: String, head: Option[Str
 
 class SplitMultiPartitionContext(
   keepStar: Boolean,
-  nSamples: Int, globalAnnotation: Annotation, rowType: TStruct,
-  vAnnotator: ExprAnnotator, gAnnotator: ExprAnnotator, newRowType: TStruct) {
+  nSamples: Int, globalAnnotation: Annotation, rvRowType: TStruct,
+  vAnnotator: ExprAnnotator, gAnnotator: ExprAnnotator, newRVRowType: TStruct) {
   var prevLocus: Locus = null
-  var ur = new UnsafeRow(rowType)
+  var ur = new UnsafeRow(rvRowType)
   val splitRegion = Region()
   val rvb = new RegionValueBuilder()
   val splitrv = RegionValue()
@@ -87,7 +88,7 @@ class SplitMultiPartitionContext(
     val va = ur.get(2)
 
     if (sortAlleles)
-      splitVariants = splitVariants.sortBy { case (svj, i) => svj } (rowType.fieldType(1).asInstanceOf[TVariant].variantOrdering)
+      splitVariants = splitVariants.sortBy { case (svj, i) => svj } (rvRowType.fieldType(1).asInstanceOf[TVariant].variantOrdering)
 
     val nAlleles = v.nAlleles
     val nGenotypes = v.nGenotypes
@@ -97,10 +98,10 @@ class SplitMultiPartitionContext(
       .map { case (svj, i) =>
         splitRegion.clear()
         rvb.set(splitRegion)
-        rvb.start(newRowType)
+        rvb.start(newRVRowType)
         rvb.startStruct()
-        rvb.addAnnotation(newRowType.fieldType(0), svj.locus)
-        rvb.addAnnotation(newRowType.fieldType(1), svj)
+        rvb.addAnnotation(newRVRowType.fieldType(0), svj.locus)
+        rvb.addAnnotation(newRVRowType.fieldType(1), svj)
 
         vAnnotator.ec.setAll(globalAnnotation, v, svj, va, i, wasSplit)
         rvb.addAnnotation(vAnnotator.newT, vAnnotator.insert(va))
@@ -177,17 +178,18 @@ class SplitMulti(vsm: MatrixTable, variantExpr: String, genotypeExpr: String, ke
     "g" -> (6, vsm.genotypeSignature)))
   val gAnnotator = new ExprAnnotator(gEC, vsm.genotypeSignature, genotypeExpr, Some(Annotation.GENOTYPE_HEAD))
 
-  val newMatrixType = vsm.matrixType.copy(vaType = vAnnotator.newT, genotypeType = gAnnotator.newT)
+  val newMatrixType = vsm.matrixType.copy(vaType = vAnnotator.newT,
+    genotypeType = gAnnotator.newT)
 
   def split(sortAlleles: Boolean, removeLeftAligned: Boolean, removeMoving: Boolean, verifyLeftAligned: Boolean): RDD[RegionValue] = {
     val localKeepStar = keepStar
     val localGlobalAnnotation = vsm.globalAnnotation
     val localNSamples = vsm.nSamples
-    val localRowType = vsm.rowType
+    val localRowType = vsm.rvRowType
     val localVAnnotator = vAnnotator
     val localGAnnotator = gAnnotator
 
-    val newRowType = newMatrixType.rowType
+    val newRowType = newMatrixType.rvRowType
 
     vsm.rdd2.mapPartitions { it =>
       val context = new SplitMultiPartitionContext(

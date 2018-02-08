@@ -1,7 +1,9 @@
 package is.hail.utils
 
 import java.io.{BufferedWriter, File, FileWriter}
+
 import is.hail.expr._
+import is.hail.expr.types._
 
 object RstUtils {
   def sectionReference(title: String) = s".. _${ title.toLowerCase }:\n\n"
@@ -315,7 +317,7 @@ object FunctionDocumentation {
     """
     .. testsetup::
 
-        vds = hc.read("data/example.vds").annotate_variants_expr('va.genes = ["ACBD", "DCBA"]')
+        vds = hc1.read("data/example.vds").annotate_variants_expr('va.genes = ["ACBD", "DCBA"]')
     """)
 
   def writeFile(filename: String, text: String) = {

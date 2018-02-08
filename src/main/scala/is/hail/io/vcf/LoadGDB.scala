@@ -4,15 +4,16 @@ import com.intel.genomicsdb.GenomicsDBFeatureReader
 import htsjdk.variant.vcf.{VCFCompoundHeaderLine, VCFHeader}
 import is.hail.HailContext
 import is.hail.annotations._
-import is.hail.expr.{TStruct, _}
+import is.hail.expr._
 import is.hail.utils._
-import is.hail.variant.{GenomeReference, VSMLocalValue, VSMMetadata, Variant, MatrixTable}
+import is.hail.variant.{GenomeReference, MatrixTable, Variant}
 import org.json4s._
 
 import scala.collection.JavaConversions._
 import scala.collection.JavaConverters.asScalaIteratorConverter
 import java.io.{File, FileWriter}
 
+import is.hail.expr.types._
 import is.hail.io.VCFAttributes
 import is.hail.io.vcf.LoadVCF.headerSignature
 
@@ -177,6 +178,8 @@ object LoadGDB {
         val ur = new UnsafeRow(localRowType, region.copy(), rvb.end())
 
         val v = ur.getAs[Variant](0)
+        gr.checkVariant(v)
+
         val va = ur.get(1)
         val gs: Iterable[Annotation] = ur.getAs[IndexedSeq[Annotation]](2)
 
@@ -188,14 +191,11 @@ object LoadGDB {
 
     queryFile.delete()
 
-    MatrixTable.fromLegacy(hc, VSMMetadata(
-      TString(),
-      TStruct.empty(),
-      TVariant(gr),
-      variantAnnotationSignatures,
-      TStruct.empty(),
-      genotypeSignature),
-      VSMLocalValue(Annotation.empty,
+    MatrixTable.fromLegacy(hc, MatrixType(
+      vType = TVariant(gr),
+      vaType = variantAnnotationSignatures,
+      genotypeType = genotypeSignature),
+      MatrixLocalValue(Annotation.empty,
         sampleIds,
         Annotation.emptyIndexedSeq(sampleIds.length)),
       recordRDD)

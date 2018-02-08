@@ -1,8 +1,9 @@
 package is.hail.expr
 
+import is.hail.expr.types._
 import is.hail.utils.StringEscapeUtils._
 import is.hail.utils._
-import is.hail.variant.GenomeReference
+import is.hail.variant.{GRBase, GenomeReference, Locus}
 import org.apache.spark.sql.Row
 
 import scala.collection.mutable
@@ -53,8 +54,8 @@ object Parser extends JavaTokenParsers {
   private def evalNoTypeCheck(t: AST, ec: EvalContext): () => Any = {
     val typedNames = ec.st.toSeq
       .sortBy { case (name, (i, _)) => i }
-      .map { case (name, (_, typ)) => (name, typ) }
-    val f = t.compile().runWithDelayedValues(typedNames.toSeq, ec)
+      .map { case (name, (i, typ)) => (name, typ, i) }
+    val f = t.compile().runWithDelayedValues(typedNames, ec)
 
     // FIXME: ec.a is actually mutable.ArrayBuffer[AnyRef] because Annotation is
     // actually AnyRef, but there's a lot to change
@@ -145,6 +146,39 @@ object Parser extends JavaTokenParsers {
     }, types, () => {
       f()
     })
+  }
+
+  def parseAnnotationExprsToAST(code: String, ec: EvalContext, expectedHead: Option[String]): (
+    Array[List[String]], Array[AST]) = {
+
+    val parsed = named_exprs(annotationIdentifier).parse(code)
+
+    val names = new Array[List[String]](parsed.size)
+    val asts = new Array[AST](parsed.size)
+
+    var i = 0
+    parsed.foreach { case (name, ast, _) =>
+      name match {
+        case Some(n) => names(i) = n
+        case None => fatal("left-hand side required in annotation expression")
+      }
+      asts(i) = ast
+      i += 1
+    }
+
+    expectedHead.foreach { h =>
+      names.foreach { n =>
+        if (n.head != h)
+          fatal(
+            s"""invalid annotation path `${ n.map(prettyIdentifier).mkString(".") }'
+               |  Path should begin with `$h'
+           """.stripMargin)
+      }
+    }
+
+    (names.map { n =>
+      if (expectedHead.isDefined) n.tail else n
+    }, asts)
   }
 
   def parseNamedExprs(code: String, ec: EvalContext): (Array[String], Array[Type], () => Array[Any]) = {
@@ -250,13 +284,14 @@ object Parser extends JavaTokenParsers {
     }, isNamed)
   }
 
-  def parseType(code: String): Type = {
-    // println(s"code = $code")
-    parseAll(type_expr, code) match {
+  def parse[T](parser: Parser[T], code: String): T = {
+    parseAll(parser, code) match {
       case Success(result, _) => result
       case NoSuccess(msg, next) => ParserUtils.error(next.pos, msg)
     }
   }
+
+  def parseType(code: String): Type = parse(type_expr, code)
 
   def parseAnnotationTypes(code: String): Map[String, Type] = {
     // println(s"code = $code")
@@ -301,8 +336,50 @@ object Parser extends JavaTokenParsers {
     parseAnnotationRoot(a, root)
   }
 
+  def parseLocusInterval(input: String, gr: GRBase): Interval = {
+    parseAll[Interval](locusInterval(gr), input) match {
+      case Success(r, _) => r
+      case NoSuccess(msg, next) => fatal(s"invalid interval expression: `$input': $msg")
+    }
+  }
+
   def withPos[T](p: => Parser[T]): Parser[Positioned[T]] =
     positioned[Positioned[T]](p ^^ { x => Positioned(x) })
+
+  def oneOfLiteral(s: String*): Parser[String] = oneOfLiteral(s.toArray)
+
+  def oneOfLiteral(a: Array[String]): Parser[String] = new Parser[String] {
+    var hasEnd: Boolean = false
+
+    val m = a.flatMap { s =>
+      val l = s.length
+      if (l == 0) {
+        hasEnd = true
+        None
+      }
+      else if (l == 1) {
+        Some((s.charAt(0), ""))
+      }
+      else
+        Some((s.charAt(0), s.substring(1)))
+    }.groupBy(_._1).mapValues { v => oneOfLiteral(v.map(_._2)) }
+
+    def apply(in: Input): ParseResult[String] = {
+      m.get(in.first) match {
+        case Some(p) =>
+          p(in.rest) match {
+            case s: Success[_] =>
+              Success(in.first.toString + s.result, in.drop(s.result.length + 1))
+            case _ => Failure("", in)
+          }
+        case None =>
+          if (hasEnd)
+            Success("", in)
+          else
+            Failure("", in)
+      }
+    }
+  }
 
   def expr: Parser[AST] = ident ~ withPos("=>") ~ expr ^^ { case param ~ arrow ~ body =>
     Lambda(arrow.pos, param, body)
@@ -427,8 +504,8 @@ object Parser extends JavaTokenParsers {
     }
 
   def primary_expr: Parser[AST] =
-    withPos("""-?\d*\.\d+[dD]?""".r) ^^ (r => Const(r.pos, r.x.toDouble, TFloat64())) |
-      withPos("""-?\d+(\.\d*)?[eE][+-]?\d+[dD]?""".r) ^^ (r => Const(r.pos, r.x.toDouble, TFloat64())) |
+    withPos("""-?\d+(\.\d+)?[eE][+-]?\d+[dD]?""".r) ^^ (r => Const(r.pos, r.x.toDouble, TFloat64())) |
+      withPos("""-?\d*\.\d+[dD]?""".r) ^^ (r => Const(r.pos, r.x.toDouble, TFloat64())) |
       withPos(wholeNumber <~ "[Ll]".r) ^^ (r => Const(r.pos, r.x.toLong, TInt64())) |
       withPos(wholeNumber) ^^ (r => Const(r.pos, r.x.toInt, TInt32())) |
       withPos(stringLiteral) ^^ { r => Const(r.pos, r.x, TString()) } |
@@ -437,15 +514,15 @@ object Parser extends JavaTokenParsers {
       withPos(structDeclaration) ^^ (r => StructConstructor(r.pos, r.x.map(_._1), r.x.map(_._2))) |
       withPos("true") ^^ (r => Const(r.pos, true, TBoolean())) |
       withPos("false") ^^ (r => Const(r.pos, false, TBoolean())) |
-      (guard(not("if" | "else")) ~> (genomeReferenceDependentTypes <~ "(") ~ (identifier <~ ")") ~ withPos("(") ~ (args <~ ")") ^^ {
+      genomeReferenceDependentTypes ~ ("(" ~> identifier <~ ")") ~ withPos("(") ~ (args <~ ")") ^^ {
         case fn ~ gr ~ lparen ~ args => GenomeReferenceDependentConstructor(lparen.pos, fn, gr, args)
-      }) |
-      (guard(not("if" | "else")) ~> genomeReferenceDependentTypes ~ withPos("(") ~ (args <~ ")") ^^ {
+      } |
+      genomeReferenceDependentTypes ~ withPos("(") ~ (args <~ ")") ^^ {
         case fn ~ lparen ~ args => GenomeReferenceDependentConstructor(lparen.pos, fn, GenomeReference.defaultReference.name, args)
-      }) |
-      (guard(not("if" | "else")) ~> withPos(identifier)) ~ withPos("(") ~ (args <~ ")") ^^ {
+      } |
+      (guard(not("if" | "else")) ~> identifier) ~ withPos("(") ~ (args <~ ")") ^^ {
         case id ~ lparen ~ args =>
-          Apply(lparen.pos, id.x, args)
+          Apply(lparen.pos, id, args)
       } |
       guard(not("if" | "else")) ~> withPos(identifier) ^^ (r => SymRef(r.pos, r.x)) |
       "{" ~> expr <~ "}" |
@@ -537,13 +614,15 @@ object Parser extends JavaTokenParsers {
       .toArray
   }
 
-  def type_expr: Parser[Type] = _required_type ~ _type_expr ^^ {case req ~ t => if (req) !t else t }
+  def type_expr: Parser[Type] = _required_type ~ _type_expr ^^ { case req ~ t => if (req) !t else t }
 
-  def _required_type: Parser[Boolean] = "!" ^^ {_ => true} | success(false)
+  def _required_type: Parser[Boolean] = "!" ^^ { _ => true } | success(false)
 
   def _type_expr: Parser[Type] =
     "Empty" ^^ { _ => TStruct.empty() } |
-      ("Interval" ~ "(") ~> identifier <~ ")" ^^ { id => GenomeReference.getReference(id).interval } |
+      // FIXME for backward compatability
+      "Interval" ~> ("(" ~> identifier <~ ")" ^^ { id => TInterval(GenomeReference.getReference(id).locusType) } |
+        "[" ~> type_expr <~ "]" ^^ { pointType => TInterval(pointType) }) |
       "Boolean" ^^ { _ => TBoolean() } |
       "Int32" ^^ { _ => TInt32() } |
       "Int64" ^^ { _ => TInt64() } |
@@ -553,8 +632,8 @@ object Parser extends JavaTokenParsers {
       "Float" ^^ { _ => TFloat64() } |
       "String" ^^ { _ => TString() } |
       "AltAllele" ^^ { _ => TAltAllele() } |
-      ("Variant" ~ "(") ~> identifier <~ ")" ^^ { id => GenomeReference.getReference(id).variant } |
-      ("Locus" ~ "(") ~> identifier <~ ")" ^^ { id => GenomeReference.getReference(id).locus } |
+      ("Variant" ~ "(") ~> identifier <~ ")" ^^ { id => GenomeReference.getReference(id).variantType } |
+      ("Locus" ~ "(") ~> identifier <~ ")" ^^ { id => GenomeReference.getReference(id).locusType } |
       "Call" ^^ { _ => TCall() } |
       ("Array" ~ "[") ~> type_expr <~ "]" ^^ { elementType => TArray(elementType) } |
       ("Set" ~ "[") ~> type_expr <~ "]" ^^ { elementType => TSet(elementType) } |
@@ -562,6 +641,16 @@ object Parser extends JavaTokenParsers {
       ("Struct" ~ "{") ~> type_fields <~ "}" ^^ { fields =>
         TStruct(fields)
       }
+
+  def parsePhysicalType(code: String): PhysicalType = parse(physical_type, code)
+
+  def physical_type: Parser[PhysicalType] =
+    ("Default" ~ "[") ~> type_expr <~ "]" ^^ { t => PDefault(t) }
+
+  def parseEncodedType(code: String): PhysicalType = parse(physical_type, code)
+
+  def encoded_type: Parser[EncodedType] =
+    ("Default" ~ "[") ~> type_expr <~ "]" ^^ { t => EDefault(t) }
 
   def solr_named_args: Parser[Array[(String, Map[String, AnyRef], AST)]] =
     repsep(solr_named_arg, ",") ^^ (_.toArray)
@@ -595,5 +684,42 @@ object Parser extends JavaTokenParsers {
     }
   }
 
-  def genomeReferenceDependentTypes = "Variant" | "Locus" | "Interval"
+  def genomeReferenceDependentTypes: Parser[String] = "Variant" | "LocusInterval" | "Locus"
+
+  def locusInterval(gr: GRBase): Parser[Interval] = {
+    val contig = gr.contigParser
+    locus(gr) ~ "-" ~ locus(gr) ^^ { case l1 ~ _ ~ l2 => Interval(l1, l2) } |
+      locus(gr) ~ "-" ~ pos ^^ { case l1 ~ _ ~ p2 => Interval(l1, l1.copyChecked(gr, position = p2.getOrElse(gr.contigLength(l1.contig)))) } |
+      contig ~ "-" ~ contig ^^ { case c1 ~ _ ~ c2 => Interval(Locus(c1, 1, gr), Locus(c2, gr.contigLength(c2), gr)) } |
+      contig ^^ { c => Interval(Locus(c, 1), Locus(c, gr.contigLength(c))) }
+  }
+
+  def locus(gr: GRBase): Parser[Locus] =
+    (gr.contigParser ~ ":" ~ pos) ^^ { case c ~ _ ~ p => Locus(c, p.getOrElse(gr.contigLength(c)), gr) }
+
+  def coerceInt(s: String): Int = try {
+    s.toInt
+  } catch {
+    case e: java.lang.NumberFormatException => Int.MaxValue
+  }
+
+  def exp10(i: Int): Int = {
+    var mult = 1
+    var j = 0
+    while (j < i) {
+      mult *= 10
+      j += 1
+    }
+    mult
+  }
+
+  def pos: Parser[Option[Int]] = {
+    "[sS][Tt][Aa][Rr][Tt]".r ^^ { _ => Some(1) } |
+      "[Ee][Nn][Dd]".r ^^ { _ => None } |
+      "\\d+".r <~ "[Kk]".r ^^ { i => Some(coerceInt(i) * 1000) } |
+      "\\d+".r <~ "[Mm]".r ^^ { i => Some(coerceInt(i) * 1000000) } |
+      "\\d+".r ~ "." ~ "\\d{1,3}".r ~ "[Kk]".r ^^ { case lft ~ _ ~ rt ~ _ => Some(coerceInt(lft + rt) * exp10(3 - rt.length)) } |
+      "\\d+".r ~ "." ~ "\\d{1,6}".r ~ "[Mm]".r ^^ { case lft ~ _ ~ rt ~ _ => Some(coerceInt(lft + rt) * exp10(6 - rt.length)) } |
+      "\\d+".r ^^ { i => Some(coerceInt(i)) }
+  }
 }

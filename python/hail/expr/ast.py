@@ -1,5 +1,7 @@
+from __future__ import absolute_import
 from hail.typecheck import *
 from hail.utils.java import Env
+from six.moves import zip
 asttype = lazy()
 
 
@@ -169,9 +171,9 @@ class StructOp(AST):
         super(StructOp, self).__init__(parent)
 
     def to_hql(self):
-        return '{}({}, {})'.format(self.operation,
+        return '{}({}{})'.format(self.operation,
                                    self.parent.to_hql(),
-                                   ', '.join('`{}`'.format(x) for x in self.keys))
+                                   ''.join(', `{}`'.format(x) for x in self.keys))
 
 
 class Condition(AST):

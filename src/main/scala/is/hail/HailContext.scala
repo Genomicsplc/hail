@@ -4,7 +4,8 @@ import java.io.InputStream
 import java.util.Properties
 
 import is.hail.annotations._
-import is.hail.expr.{EvalContext, Parser, TStruct, Type, _}
+import is.hail.expr.types._
+import is.hail.expr.{EvalContext, Parser}
 import is.hail.io.{Decoder, LZ4InputBuffer}
 import is.hail.io.LoadMatrix
 import is.hail.io.bgen.BgenLoader
@@ -15,7 +16,7 @@ import is.hail.table.Table
 import is.hail.rvd.OrderedRVD
 import is.hail.stats.{BaldingNicholsModel, Distribution, UniformDist}
 import is.hail.utils.{log, _}
-import is.hail.variant.{GenomeReference, Genotype, HTSGenotypeView, Locus, VSMFileMetadata, VSMSubgen, Variant, MatrixTable}
+import is.hail.variant.{GenomeReference, Genotype, HTSGenotypeView, Locus, MatrixTable, MatrixFileMetadata, VSMSubgen, Variant}
 import org.apache.commons.lang3.StringUtils
 import org.apache.hadoop
 import org.apache.log4j.{ConsoleAppender, LogManager, PatternLayout, PropertyConfigurator}
@@ -164,7 +165,8 @@ object HailContext {
     ProgressBarBuilder.build(sparkContext)
 
     val sqlContext = new org.apache.spark.sql.SQLContext(sparkContext)
-    val hc = new HailContext(sparkContext, sqlContext, tmpDir, branchingFactor)
+    val hailTempDir = TempDir.createTempDir(tmpDir, sparkContext.hadoopConfiguration)
+    val hc = new HailContext(sparkContext, sqlContext, hailTempDir, branchingFactor)
     sparkContext.uiWebUrl.foreach(ui => info(s"SparkUI: $ui"))
 
     info(s"Running Hail version ${ hc.version }")
@@ -222,6 +224,9 @@ class HailContext private(val sc: SparkContext,
         }
       }
   }
+
+  def getTemporaryFile(nChar: Int = 10, prefix: Option[String] = None, suffix: Option[String] = None): String =
+    sc.hadoopConfiguration.getTemporaryFile(tmpDir, nChar, prefix, suffix)
 
   def importBgen(file: String,
     sampleFile: Option[String] = None,
@@ -292,7 +297,7 @@ class HailContext private(val sc: SparkContext,
     val nSamples = samples.length
 
     //FIXME: can't specify multiple chromosomes
-    val results = inputs.map(f => GenLoader(f, sampleFile, sc, nPartitions,
+    val results = inputs.map(f => GenLoader(f, sampleFile, sc, gr, nPartitions,
       tolerance, chromosome, contigRecoding.getOrElse(Map.empty[String, String])))
 
     val unequalSamples = results.filter(_.nSamples != nSamples).map(x => (x.file, x.nSamples))
@@ -318,7 +323,7 @@ class HailContext private(val sc: SparkContext,
     val rdd = sc.union(results.map(_.rdd))
 
     MatrixTable.fromLegacy(this,
-      VSMFileMetadata(samples,
+      MatrixFileMetadata(samples,
         vaSignature = signature,
         genotypeSignature = TStruct("GT" -> TCall(),
           "GP" -> TArray(TFloat64()))),
@@ -383,14 +388,15 @@ class HailContext private(val sc: SparkContext,
     quantPheno: Boolean = false,
     a2Reference: Boolean = true,
     gr: GenomeReference = GenomeReference.defaultReference,
-    contigRecoding: Option[Map[String, String]] = None): MatrixTable = {
+    contigRecoding: Option[Map[String, String]] = None,
+    dropChr0: Boolean = false): MatrixTable = {
 
     contigRecoding.foreach(gr.validateContigRemap)
 
     val ffConfig = FamFileConfig(quantPheno, delimiter, missing)
 
     PlinkLoader(this, bed, bim, fam,
-      ffConfig, nPartitions, a2Reference, gr, contigRecoding.getOrElse(Map.empty[String, String]))
+      ffConfig, nPartitions, a2Reference, gr, contigRecoding.getOrElse(Map.empty[String, String]), dropChr0)
   }
 
   def importPlinkBFile(bfileRoot: String,
@@ -400,9 +406,10 @@ class HailContext private(val sc: SparkContext,
     quantPheno: Boolean = false,
     a2Reference: Boolean = true,
     gr: GenomeReference = GenomeReference.defaultReference,
-    contigRecoding: Option[Map[String, String]] = None): MatrixTable = {
+    contigRecoding: Option[Map[String, String]] = None,
+    dropChr0: Boolean = false): MatrixTable = {
     importPlink(bfileRoot + ".bed", bfileRoot + ".bim", bfileRoot + ".fam",
-      nPartitions, delimiter, missing, quantPheno, a2Reference, gr, contigRecoding)
+      nPartitions, delimiter, missing, quantPheno, a2Reference, gr, contigRecoding, dropChr0)
   }
 
   def read(file: String, dropSamples: Boolean = false, dropVariants: Boolean = false): MatrixTable = {
@@ -519,7 +526,8 @@ class HailContext private(val sc: SparkContext,
     missingVal: String = "NA"): MatrixTable = {
     val inputs = hadoopConf.globAll(files)
 
-    LoadMatrix(this, inputs, annotationHeaders, annotationTypes, keyExpr, nPartitions = nPartitions, dropSamples = dropSamples, cellType = cellType, missingValue = missingVal)
+    LoadMatrix(this, inputs, annotationHeaders, annotationTypes, keyExpr, nPartitions = nPartitions,
+      dropSamples = dropSamples, cellType = TStruct("x" -> cellType), missingValue = missingVal)
   }
 
   def indexBgen(file: String) {

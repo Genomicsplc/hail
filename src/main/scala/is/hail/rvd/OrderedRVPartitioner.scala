@@ -1,9 +1,9 @@
 package is.hail.rvd
 
 import is.hail.annotations._
-import is.hail.expr.{JSONAnnotationImpex, Parser, TArray, TStruct}
+import is.hail.expr.types._
+import is.hail.expr.{JSONAnnotationImpex, Parser}
 import is.hail.utils._
-import is.hail.sparkextras.BinarySearch
 import org.apache.spark.{Partitioner, SparkContext}
 import org.json4s.JsonAST._
 
@@ -24,7 +24,7 @@ class OrderedRVPartitioner(
   val rangeBoundsType = TArray(pkType)
   assert(rangeBoundsType.typeCheck(rangeBounds))
 
-  val ordering: Ordering[Annotation] = pkType.ordering(missingGreatest = true)
+  val ordering: Ordering[Annotation] = pkType.ordering.toOrdering
   require(rangeBounds.isEmpty || rangeBounds.zip(rangeBounds.tail).forall { case (left, right) => ordering.compare(left, right) < 0 })
 
   def region: Region = rangeBounds.region
@@ -67,6 +67,12 @@ class OrderedRVPartitioner(
       "partitionKey" -> JArray(partitionKey.map(n => JString(n)).toList),
       "kType" -> JString(kType.toPrettyString(compact = true)),
       "rangeBounds" -> JSONAnnotationImpex.exportAnnotation(rangeBounds, rangeBoundsType)))
+
+  def withKType(newPartitionKey: Array[String], newKType: TStruct): OrderedRVPartitioner = {
+    val newPart = new OrderedRVPartitioner(numPartitions, newPartitionKey, newKType, rangeBounds)
+    assert(newPart.pkType == pkType)
+    newPart
+  }
 }
 
 object OrderedRVPartitioner {

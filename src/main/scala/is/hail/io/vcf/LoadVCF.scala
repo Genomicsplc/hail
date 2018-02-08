@@ -3,7 +3,8 @@ package is.hail.io.vcf
 import htsjdk.variant.vcf._
 import is.hail.HailContext
 import is.hail.annotations._
-import is.hail.expr.{TStruct, _}
+import is.hail.expr.types._
+import is.hail.expr._
 import is.hail.io.{VCFAttributes, VCFMetadata}
 import is.hail.rvd.OrderedRVD
 import is.hail.utils._
@@ -220,7 +221,7 @@ final class VCFLine(val line: String) {
   }
 
   // return false if it should be filtered
-  def parseAddVariant(rvb: RegionValueBuilder, contigRecoding: Map[String, String]): Boolean = {
+  def parseAddVariant(rvb: RegionValueBuilder, gr: GenomeReference, contigRecoding: Map[String, String]): Boolean = {
     assert(pos == 0)
 
     if (line.isEmpty || line(0) == '#')
@@ -234,6 +235,8 @@ final class VCFLine(val line: String) {
     // POS (start)
     val start = parseInt()
     nextField()
+
+    gr.checkLocus(recodedContig, start)
 
     skipField() // ID
     nextField()
@@ -613,7 +616,11 @@ object LoadVCF {
         && !input.endsWith(".vcf.bgz")) {
         if (input.endsWith(".vcf.gz")) {
           if (!forcegz)
-            fatal(".gz cannot be loaded in parallel, use .bgz or force=True override")
+            fatal(""".gz cannot be loaded in parallel. Is your file actually *block* gzipped?
+                    |If your file is actually block gzipped (even though its extension is .gz),
+                    |use force_bgz=True to ignore the file extension and treat this file as if
+                    |it were a .bgz file. If you are sure that you want to load a non-block 
+                    |gzipped using the very slow, non-parallel algorithm, use force=True.""".stripMargin)
         } else
           fatal(s"unknown input file type `$input', expect .vcf[.bgz]")
       }
@@ -743,7 +750,7 @@ object LoadVCF {
 
   // parses the Variant (key), leaves the rest to f
   def parseLines[C](makeContext: () => C)(f: (C, VCFLine, RegionValueBuilder) => Unit)(
-    lines: RDD[WithContext[String]], t: Type, contigRecoding: Map[String, String]): RDD[RegionValue] = {
+    lines: RDD[WithContext[String]], t: Type, gr: GenomeReference, contigRecoding: Map[String, String]): RDD[RegionValue] = {
     lines.mapPartitions { it =>
       new Iterator[RegionValue] {
         val region = Region()
@@ -763,7 +770,7 @@ object LoadVCF {
               region.clear()
               rvb.start(t)
               rvb.startStruct()
-              present = vcfLine.parseAddVariant(rvb, contigRecoding)
+              present = vcfLine.parseAddVariant(rvb, gr, contigRecoding)
               if (present) {
                 f(context, vcfLine, rvb)
 
@@ -877,22 +884,19 @@ object LoadVCF {
 
     val lines = sc.textFilesLines(files, nPartitions.getOrElse(sc.defaultMinPartitions))
 
-    val vsmMetadata = VSMMetadata(
-      TString(),
-      TStruct.empty(),
-      TVariant(gr),
-      vaSignature,
-      TStruct.empty(),
-      genotypeSignature)
-    val matrixType = MatrixType(vsmMetadata)
+    val matrixType: MatrixType = MatrixType(
+      sType = TString(),
+      vType = TVariant(gr),
+      vaType = vaSignature,
+      genotypeType = genotypeSignature)
 
     val locusType = matrixType.locusType
     val vType = matrixType.vType
-    val kType = matrixType.kType
-    val rowType = matrixType.rowType
+    val kType = matrixType.orderedRVType.kType
+    val rowType = matrixType.rvRowType
 
     // nothing after the key
-    val justVariants = parseLines(() => ())((c, l, rvb) => ())(lines, kType, contigRecoding)
+    val justVariants = parseLines(() => ())((c, l, rvb) => ())(lines, kType, gr, contigRecoding)
 
     val rdd = OrderedRVD(
       matrixType.orderedRVType,
@@ -926,12 +930,12 @@ object LoadVCF {
           }
         }
         rvb.endArray()
-      }(lines, rowType, contigRecoding),
+      }(lines, rowType, gr, contigRecoding),
       Some(justVariants), None)
 
     new MatrixTable(hc,
-      vsmMetadata,
-      VSMLocalValue(Annotation.empty,
+      matrixType,
+      MatrixLocalValue(Annotation.empty,
         sampleIds,
         Annotation.emptyIndexedSeq(sampleIds.length)),
       rdd)

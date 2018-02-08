@@ -4,7 +4,7 @@ import java.util
 
 import is.hail.annotations.Annotation
 import is.hail.check.{Arbitrary, Gen}
-import is.hail.expr._
+import is.hail.expr.types._
 import is.hail.utils._
 import org.apache.commons.lang3.builder.HashCodeBuilder
 import org.apache.spark.sql.Row
@@ -165,8 +165,8 @@ object Genotype {
     m2 - m
   }
 
-  def gtFromPL(a: IndexedSeq[Int]): Call = {
-    def f(i: Int, m: Int, mi: Int, count: Int): Call = {
+  def gtFromPL(a: IndexedSeq[Int]): BoxedCall = {
+    def f(i: Int, m: Int, mi: Int, count: Int): BoxedCall = {
       if (i == a.length) {
         assert(count >= 1)
         if (count == 1)

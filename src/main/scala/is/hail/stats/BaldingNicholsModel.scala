@@ -4,10 +4,11 @@ import breeze.linalg.{DenseVector, sum, _}
 import breeze.stats.distributions._
 import is.hail.HailContext
 import is.hail.annotations._
-import is.hail.expr.{MatrixType, TArray, TCall, TFloat64, TInt32, TLocus, TString, TStruct, TVariant}
+import is.hail.expr.types._
+import is.hail.expr.MatrixLocalValue
 import is.hail.rvd.OrderedRVD
 import is.hail.utils._
-import is.hail.variant.{GenomeReference, Genotype, VSMLocalValue, VSMMetadata, Variant, MatrixTable}
+import is.hail.variant.{GenomeReference, MatrixTable}
 import org.apache.commons.math3.random.JDKRandomGenerator
 
 object BaldingNicholsModel {
@@ -106,23 +107,22 @@ object BaldingNicholsModel {
       "ancestralAFDist" -> ancestralAFAnnotationSignature,
       "seed" -> TInt32())
 
-    val vsmMetadata = VSMMetadata(
-      TString(),
-      saSignature,
-      TVariant(gr),
-      vaSignature,
-      globalSignature,
-      TStruct("GT" -> TCall()))
+    val matrixType = MatrixType(
+      globalType = globalSignature,
+      sType = TString(),
+      saType = saSignature,
+      vType = TVariant(gr),
+      vaType = vaSignature,
+      genotypeType = TStruct("GT" -> TCall()))
 
-    val matrixType = MatrixType(vsmMetadata)
-
-    val rowType = matrixType.rowType
+    val rowType = matrixType.rvRowType
 
     val rdd = sc.parallelize((0 until M).view.map(m => (m, Rand.randInt.draw())), nPartitions)
       .mapPartitions { it =>
 
-        val rv = RegionValue(Region())
-        val rvb = new RegionValueBuilder(rv.region)
+        val region = Region()
+        val rv = RegionValue(region)
+        val rvb = new RegionValueBuilder(region)
 
         it.map { case (m, perVariantSeed) =>
           val perVariantRandomGenerator = new JDKRandomGenerator
@@ -135,7 +135,7 @@ object BaldingNicholsModel {
             new Beta(ancestralAF * Fst1_kBc.value(k), (1 - ancestralAF) * Fst1_kBc.value(k))(perVariantRandomBasis).draw()
           }
 
-          rvb.clear()
+          region.clear()
           rvb.start(rowType)
           rvb.startStruct()
 
@@ -205,8 +205,8 @@ object BaldingNicholsModel {
     val ordrdd = OrderedRVD(matrixType.orderedRVType, rdd, None, None)
 
     new MatrixTable(hc,
-      vsmMetadata,
-      VSMLocalValue(globalAnnotation, sampleIds, sampleAnnotations),
+      matrixType,
+      MatrixLocalValue(globalAnnotation, sampleIds, sampleAnnotations),
       ordrdd)
   }
 }

@@ -1,3 +1,4 @@
+from __future__ import absolute_import
 from hail.api2.context import HailContext
 from hail.api2.table import Table, GroupedTable, asc, desc
 from hail.api2.matrixtable import MatrixTable, GroupedMatrixTable

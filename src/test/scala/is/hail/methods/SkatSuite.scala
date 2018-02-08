@@ -9,9 +9,9 @@ import is.hail.utils._
 import is.hail.testUtils._
 import is.hail.variant._
 import is.hail.stats.vdsFromGtMatrix
-
 import breeze.linalg._
 import breeze.numerics.sigmoid
+import is.hail.expr.types._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.Row
 import org.testng.annotations.Test
@@ -135,8 +135,8 @@ class SkatSuite extends SparkSuite {
 
     hc.importVCF("src/test/resources/sample2.vcf")
       .filterVariantsExpr("v.isBiallelic")
-      .annotateVariantsTable(intervalsSkat, root = "va.gene") // intervals do not overlap
-      .annotateVariantsTable(weightsSkat, root = "va.weight")
+      .annotateVariantsTable(intervalsSkat, expr = "va.gene = table.target") // intervals do not overlap
+      .annotateVariantsTable(weightsSkat, expr = "va.weight = table.weight")
       .annotateSamplesTable(covSkat, root = "sa.cov")
       .annotateSamplesTable(phenoSkat, root = "sa.pheno")
       .annotateSamplesExpr("sa.pheno = if (sa.pheno == 1.0) false else if (sa.pheno == 2.0) true else NA: Boolean")
@@ -269,7 +269,7 @@ class SkatSuite extends SparkSuite {
     // annotations from table
     val kt = IntervalList.read(hc, "src/test/resources/skat2.interval_list")
     val vds = vds0
-      .annotateVariantsTable(kt, root = "va.key", product = true)
+      .annotateVariantsTable(kt, expr = "va.key = table.map(x => x.target)", product = true)
       .annotateVariantsExpr("va.key = va.key.toSet(), va.weight = v.start")
       .explodeVariants("va.key")
       .annotateVariantsExpr("va.key = va.key.toInt32()")

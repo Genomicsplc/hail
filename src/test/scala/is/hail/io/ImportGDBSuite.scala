@@ -1,8 +1,9 @@
 package is.hail.io
 
 import is.hail.SparkSuite
-import is.hail.expr.TStruct
+import is.hail.expr.types.TStruct
 import is.hail.io.vcf.{HtsjdkRecordReader, LoadGDB, LoadVCF}
+import is.hail.testUtils._
 import org.testng.annotations.Test
 
 class ImportGDBSuite extends SparkSuite {
@@ -37,11 +38,9 @@ class ImportGDBSuite extends SparkSuite {
     val vcfVariantSampleMatrix = LoadVCF(hc, reader, Some(vcf), Array(vcf))
 
     val vcfVAS = vcfVariantSampleMatrix
-      .metadata
       .vaSignature
 
     val gdbVAS = gdbVariantSampleMatrix
-      .metadata
       .vaSignature
 
     assert(vcfVAS.equals(gdbVAS))

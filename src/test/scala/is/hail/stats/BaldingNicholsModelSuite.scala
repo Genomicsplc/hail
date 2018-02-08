@@ -2,8 +2,8 @@ package is.hail.stats
 
 import breeze.stats._
 import is.hail.SparkSuite
-import is.hail.variant.{Genotype, Locus, Variant}
-import is.hail.variant.{Call, Genotype}
+import is.hail.variant.{Call, Locus, Variant}
+import is.hail.testUtils._
 import org.apache.spark.sql.Row
 import org.testng.Assert.assertEquals
 import org.testng.annotations.Test
@@ -77,7 +77,7 @@ class BaldingNicholsModelSuite extends SparkSuite {
       }
 
       //Test genotype distributions
-      val meanGeno_mk = bnm.typedRDD[Locus, Variant]
+      val meanGeno_mk = bnm.typedRDD[Variant]
         .map(_._2._2.zip(popArray).groupBy(_._2).toSeq.sortBy(_._1))
         .map(_.map(popIterPair => mean(popIterPair._2.map(x => x._1.asInstanceOf[Row].getAs[Call](0).toDouble))).toArray)
         .collect()

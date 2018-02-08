@@ -1,8 +1,10 @@
 from __future__ import print_function  # Python 2 and 3 print compatibility
+from __future__ import absolute_import
 from hail.typecheck import *
 from hail.expr.expression import *
 from hail.expr.ast import *
 from hail.genetics import Variant, Locus, Call, GenomeReference
+from six.moves import filter
 
 
 def _to_agg(x):
@@ -12,20 +14,21 @@ def _to_agg(x):
         x = to_expr(x)
         uid = Env._get_uid()
         ast = LambdaClassMethod('map', uid, AggregableReference(), x._ast)
-        return Aggregable(ast, x._type, x._indices, x._aggregations, x._joins)
+        return Aggregable(ast, x._type, x._indices, x._aggregations, x._joins, x._refs)
 
 
 @typecheck(name=strlike, aggregable=Aggregable, ret_type=Type, args=anytype)
 def _agg_func(name, aggregable, ret_type, *args):
     args = [to_expr(a) for a in args]
-    indices, aggregations, joins = unify_all(aggregable, *args)
+    indices, aggregations, joins, refs = unify_all(aggregable, *args)
     if aggregations:
-        raise ValueError('cannot aggregate an already-aggregated expression')
+        raise ExpressionException('Cannot aggregate an already-aggregated expression')
 
     ast = ClassMethod(name, aggregable._ast, *[a._ast for a in args])
-    return construct_expr(ast, ret_type, Indices(source=indices.source), (Aggregation(indices),), joins)
+    return construct_expr(ast, ret_type, Indices(source=indices.source),
+                          aggregations.push(Aggregation(indices, refs)), joins)
 
-
+@typecheck(expr=oneof(Aggregable, expr_any))
 def collect(expr):
     """Collect records into an array.
 
@@ -35,7 +38,7 @@ def collect(expr):
 
     .. doctest::
 
-        >>> table1.aggregate(ht_over_68 = agg.collect(agg.filter(table1.ID, table1.HT > 68)))
+        >>> table1.aggregate(ht_over_68 = agg.collect(agg.filter(table1.HT > 68, table1.ID)))
         Struct(ht_over_68=[2, 3])
 
     Notes
@@ -51,18 +54,18 @@ def collect(expr):
 
     Parameters
     ----------
-    expr : :class:`hail.expr.expression.Expression`
+    expr : :class:`.Expression`
         Expression to collect.
 
     Returns
     -------
-    :class:`hail.expr.expression.ArrayExpression`
+    :class:`.ArrayExpression`
         Array of all `expr` records.
     """
     agg = _to_agg(expr)
     return _agg_func('collect', agg, TArray(agg._type))
 
-
+@typecheck(expr=oneof(Aggregable, expr_any))
 def collect_as_set(expr):
     """Collect records into a set.
 
@@ -72,7 +75,7 @@ def collect_as_set(expr):
 
     .. doctest::
 
-        >>> table1.aggregate(ht_over_68 = agg.collect_as_set(agg.filter(table1.ID, table1.HT > 68)))
+        >>> table1.aggregate(ht_over_68 = agg.collect_as_set(agg.filter(table1.HT > 68, table1.ID)))
         Struct(ht_over_68=set([2, 3])
 
     Warning
@@ -81,19 +84,19 @@ def collect_as_set(expr):
 
     Parameters
     ----------
-    expr : :class:`hail.expr.expression.Expression`
+    expr : :class:`.Expression`
         Expression to collect.
 
     Returns
     -------
-    :class:`hail.expr.expression.SetExpression`
+    :class:`.SetExpression`
         Set of unique `expr` records.
     """
 
     agg = _to_agg(expr)
     return _agg_func('collectAsSet', agg, TArray(agg._type))
 
-
+@typecheck(expr=nullable(oneof(Aggregable, expr_any)))
 def count(expr=None):
     """Count the number of records.
 
@@ -124,12 +127,12 @@ def count(expr=None):
 
     Parameters
     ----------
-    expr : :class:`Expression`, or :obj:`None`
+    expr : :class:`.Expression`, or :obj:`None`
         Expression to count.
 
     Returns
     -------
-    :class:`hail.expr.expression.Int64Expression`
+    :class:`.Int64Expression`
         Total number of records.
     """
     if expr is not None:
@@ -137,7 +140,7 @@ def count(expr=None):
     else:
         return _agg_func('count', _to_agg(0), TInt64())
 
-
+@typecheck(condition=oneof(Aggregable, expr_bool))
 def count_where(condition):
     """Count the number of records where a predicate is ``True``.
 
@@ -153,17 +156,18 @@ def count_where(condition):
 
     Parameters
     ----------
-    condition : :class:`hail.expr.expression.BooleanExpression`
+    condition : :class:`.BooleanExpression`
         Criteria for inclusion.
 
     Returns
     -------
-    :class:`hail.expr.expression.Int64Expression`
+    :class:`.Int64Expression`
         Total number of records where `condition` is ``True``.
     """
-    return _agg_func('count', filter(1, condition), TInt64())
 
+    return _agg_func('count', list(filter(condition, 0)), TInt64())
 
+@typecheck(expr=oneof(Aggregable, expr_any))
 def counter(expr):
     """Count the occurrences of each unique record and return a dictionary.
 
@@ -179,7 +183,7 @@ def counter(expr):
     Notes
     -----
     This aggregator method returns a dict expression whose key type is the
-    same type as `expr` and whose value type is :class:`Int64Expression`.
+    same type as `expr` and whose value type is :class:`.Int64Expression`.
     This dict contains a key for each unique value of `expr`, and the value
     is the number of times that key was observed.
 
@@ -192,18 +196,18 @@ def counter(expr):
 
     Parameters
     ----------
-    expr : :class:`hail.expr.expression.Expression`
+    expr : :class:`.Expression`
         Expression to count by key.
 
     Returns
     -------
-    :class:`hail.expr.expression.DictExpression`
+    :class:`.DictExpression`
         Dictionary with the number of occurrences of each unique record.
     """
     agg = _to_agg(expr)
     return _agg_func('counter', agg, TDict(agg._type, TInt64()))
 
-
+@typecheck(expr=oneof(Aggregable, expr_any), n=integral, ordering=nullable(oneof(expr_any, func_spec(1, expr_any))))
 def take(expr, n, ordering=None):
     """Take `n` records of `expr`, optionally ordered by `ordering`.
 
@@ -247,16 +251,16 @@ def take(expr, n, ordering=None):
 
     Parameters
     ----------
-    expr : :class:`hail.expr.expression.Expression`
+    expr : :class:`.Expression`
         Expression to store.
-    n : :class:`hail.expr.expression.Int32Expression`
+    n : :class:`.Int32Expression`
         Number of records to take.
-    ordering : :class:`hail.expr.expression.Expression` or function or None
+    ordering : :class:`.Expression` or function ((arg) -> :class:`.Expression`) or None
         Optional ordering on records.
 
     Returns
     -------
-    :class:`hail.expr.expression.ArrayExpression`
+    :class:`.ArrayExpression`
         Array of up to `n` records of `expr`.
 
     """
@@ -269,18 +273,24 @@ def take(expr, n, ordering=None):
         if callable(ordering):
             lambda_result = to_expr(
                 ordering(construct_expr(Reference(uid), agg._type, agg._indices,
-                                        agg._aggregations, agg._joins)))
+                                        agg._aggregations, agg._joins, agg._refs)))
         else:
-            lambda_result = to_expr(ordering)
-        indices, aggregations, joins = unify_all(agg, lambda_result)
+            lambda_result = ordering
+        indices, aggregations, joins, refs = unify_all(agg, lambda_result)
+
+        if not (is_numeric(ordering._type) or isinstance(ordering._type, TString)):
+            raise TypeError("'take' expects 'ordering' to be or return an ordered expression\n"
+                            "    Ordered expressions are 'Int32', 'Int64', 'Float32', 'Float64', 'String'\n"
+                            "    Found '{}'".format(ordering._type))
         ast = LambdaClassMethod('takeBy', uid, agg._ast, lambda_result._ast, n._ast)
 
         if aggregations:
-            raise ValueError('cannot aggregate an already-aggregated expression')
+            raise ExpressionException('Cannot aggregate an already-aggregated expression')
 
-        return construct_expr(ast, TArray(agg._type), Indices(source=indices.source), (Aggregation(indices),), joins)
+        return construct_expr(ast, TArray(agg._type), Indices(source=indices.source),
+                              aggregations.push(Aggregation(indices, refs)), joins)
 
-
+@typecheck(expr=oneof(Aggregable, expr_numeric))
 def min(expr):
     """Compute the minimum `expr`.
 
@@ -300,18 +310,20 @@ def min(expr):
 
     Parameters
     ----------
-    expr : :class:`hail.expr.expression.NumericExpression`
+    expr : :class:`.NumericExpression`
         Numeric expression.
 
     Returns
     -------
-    :class:`hail.expr.expression.NumericExpression`
+    :class:`.NumericExpression`
         Minimum value of all `expr` records, same type as `expr`.
     """
     agg = _to_agg(expr)
+    if not is_numeric(agg._type):
+        raise TypeError("'min' expects a numeric argument, found '{}'".format(agg._type))
     return _agg_func('min', agg, agg._type)
 
-
+@typecheck(expr=oneof(Aggregable, expr_numeric))
 def max(expr):
     """Compute the maximum `expr`.
 
@@ -331,18 +343,20 @@ def max(expr):
 
     Parameters
     ----------
-    expr : :class:`hail.expr.expression.NumericExpression`
+    expr : :class:`.NumericExpression`
         Numeric expression.
 
     Returns
     -------
-    :class:`hail.expr.expression.NumericExpression`
+    :class:`.NumericExpression`
         Maximum value of all `expr` records, same type as `expr`.
     """
     agg = _to_agg(expr)
+    if not is_numeric(agg._type):
+        raise TypeError("'max' expects a numeric argument, found '{}'".format(agg._type))
     return _agg_func('max', agg, agg._type)
 
-
+@typecheck(expr=oneof(Aggregable, expr_numeric))
 def sum(expr):
     """Compute the sum of all records of `expr`.
 
@@ -359,26 +373,58 @@ def sum(expr):
     -----
     Missing values are ignored (treated as zero).
 
-    If `expr` is an expression of type :class:`hail.expr.types.TInt32` or :class:`hail.expr.types.TInt64`, then
-    the result is an expression of type :class:`hail.expr.types.TInt64`. If `expr` is an
-    expression of type :class:`hail.expr.types.TFloat32` or :class:`hail.expr.types.TFloat64`, then the result
-    is an expression of type :class:`hail.expr.types.TFloat64`.
+    If `expr` is an expression of type :class:`.TInt32` or :class:`.TInt64`, then
+    the result is an expression of type :class:`.TInt64`. If `expr` is an
+    expression of type :class:`.TFloat32` or :class:`.TFloat64`, then the result
+    is an expression of type :class:`.TFloat64`.
 
     Parameters
     ----------
-    expr : :class:`hail.expr.expression.NumericExpression`
+    expr : :class:`.NumericExpression`
         Numeric expression.
 
     Returns
     -------
-    :class:`hail.expr.expression.Int64Expression` or :class:`hail.expr.expression.Float64Expression`
+    :class:`.Int64Expression` or :class:`.Float64Expression`
         Sum of records of `expr`.
     """
     agg = _to_agg(expr)
-    # FIXME I think this type is wrong
+    if not is_numeric(agg._type):
+        raise TypeError("'sum' expects a numeric argument, found '{}'".format(agg._type))
     return _agg_func('sum', agg, agg._type)
 
+@typecheck(expr=oneof(Aggregable, expr_any))
+def array_sum(expr):
+    """Compute the coordinate-wise sum of all records of `expr`.
 
+    Examples
+    --------
+    Compute the sum of `C1` and `C2`:
+
+    .. doctest::
+
+        >>> table1.aggregate(ac_sum=agg.array_sum([table1.C1, table1.C2]))
+        Struct(ac_sum=[25, 46])
+
+    Notes
+    ------
+    All records must have the same length. Each coordinate is summed
+    independently as described in :func:`sum`.
+
+    Parameters
+    ----------
+    expr : :class:`.ArrayNumericExpression`
+
+    Returns
+    -------
+    :class:`.ArrayNumericExpression`
+    """
+    agg = _to_agg(expr)
+    if not (isinstance(agg._type, TArray) and is_numeric(agg._type.element_type)):
+        raise TypeError("'array_sum' expects a numeric array argument, found '{}'".format(agg._type))
+    return _agg_func('sum', agg, agg._type)
+
+@typecheck(expr=oneof(Aggregable, expr_numeric))
 def mean(expr):
     """Compute the mean value of records of `expr`.
 
@@ -397,17 +443,20 @@ def mean(expr):
 
     Parameters
     ----------
-    expr : :class:`hail.expr.expression.NumericExpression`
+    expr : :class:`.NumericExpression`
         Numeric expression.
 
     Returns
     -------
-    :class:`hail.expr.expression.Float64Expression`
+    :class:`.Float64Expression`
         Mean value of records of `expr`.
     """
-    return stats(expr).mean
+    agg = _to_agg(expr)
+    if not is_numeric(agg._type):
+        raise TypeError("'mean' expects a numeric argument, found '{}'".format(agg._type))
+    return stats(agg).mean
 
-
+@typecheck(expr=oneof(Aggregable, expr_numeric))
 def stats(expr):
     """Compute a number of useful statistics about `expr`.
 
@@ -424,29 +473,31 @@ def stats(expr):
     -----
     Computes a struct with the following fields:
 
-    - `min` (:class:`hail.expr.types.TFloat64`) - Minimum value.
-    - `max` (:class:`hail.expr.types.TFloat64`) - Maximum value.
-    - `mean` (:class:`hail.expr.types.TFloat64`) - Mean value,
-    - `stdev` (:class:`hail.expr.types.TFloat64`) - Standard deviation.
-    - `nNotMissing` (:class:`hail.expr.types.TFloat64`) - Number of non-missing records.
-    - `sum` (:class:`hail.expr.types.TFloat64`) - Sum.
+    - `min` (:class:`.TFloat64`) - Minimum value.
+    - `max` (:class:`.TFloat64`) - Maximum value.
+    - `mean` (:class:`.TFloat64`) - Mean value,
+    - `stdev` (:class:`.TFloat64`) - Standard deviation.
+    - `nNotMissing` (:class:`.TFloat64`) - Number of non-missing records.
+    - `sum` (:class:`.TFloat64`) - Sum.
 
     Parameters
     ----------
-    expr : :class:`hail.expr.expression.NumericExpression`
+    expr : :class:`.NumericExpression`
         Numeric expression.
 
     Returns
     -------
-    :class:`hail.expr.expression.StructExpression`
+    :class:`.StructExpression`
         Struct expression with fields `mean`, `stdev`, `min`, `max`,
         `nNotMissing`, and `sum`.
     """
     agg = _to_agg(expr)
+    if not is_numeric(agg._type):
+        raise TypeError("'stats' expects a numeric argument, found '{}'".format(agg._type))
     return _agg_func('stats', agg, TStruct(['mean', 'stdev', 'min', 'max', 'nNotMissing', 'sum'],
                                            [TFloat64(), TFloat64(), TFloat64(), TFloat64(), TInt64(), TFloat64()]))
 
-
+@typecheck(expr=oneof(Aggregable, expr_numeric))
 def product(expr):
     """Compute the product of all records of `expr`.
 
@@ -463,27 +514,28 @@ def product(expr):
     -----
     Missing values are ignored (treated as one).
 
-    If `expr` is an expression of type :class:`hail.expr.types.TInt32` or :class:`hail.expr.types.TInt64`, then
-    the result is an expression of type :class:`hail.expr.types.TInt64`. If `expr` is an
-    expression of type :class:`hail.expr.types.TFloat32` or :class:`hail.expr.types.TFloat64`, then the result
-    is an expression of type :class:`hail.expr.types.TFloat64`.
+    If `expr` is an expression of type :class:`.TInt32` or :class:`.TInt64`, then
+    the result is an expression of type :class:`.TInt64`. If `expr` is an
+    expression of type :class:`.TFloat32` or :class:`.TFloat64`, then the result
+    is an expression of type :class:`.TFloat64`.
 
     Parameters
     ----------
-    expr : :class:`hail.expr.expression.NumericExpression`
+    expr : :class:`.NumericExpression`
         Numeric expression.
 
     Returns
     -------
-    :class:`hail.expr.expression.Int64Expression` or :class:`hail.expr.expression.Float64Expression`
+    :class:`.Int64Expression` or :class:`.Float64Expression`
         Product of records of `expr`.
     """
 
     agg = _to_agg(expr)
-    # FIXME I think this type is wrong
+    if not is_numeric(agg._type):
+        raise TypeError("'product' expects a numeric argument, found '{}'".format(agg._type))
     return _agg_func('product', agg, agg._type)
 
-
+@typecheck(predicate=oneof(Aggregable, expr_bool))
 def fraction(predicate):
     """Compute the fraction of records where `predicate` is ``True``.
 
@@ -502,28 +554,28 @@ def fraction(predicate):
 
     Parameters
     ----------
-    predicate : :class:`hail.expr.expression.BooleanExpression`
+    predicate : :class:`.BooleanExpression`
         Boolean predicate.
 
     Returns
     -------
-    :class:`hail.expr.expression.Float64Expression`
+    :class:`.Float64Expression`
         Fraction of records where `predicate` is ``True``.
     """
     agg = _to_agg(predicate)
     if not isinstance(agg._type, TBoolean):
         raise TypeError(
-            "'fraction' aggregator expects an expression of type 'TBoolean', found '{}'".format(agg._type.__class__))
+            "'fraction' aggregator expects an expression of type 'Boolean', found '{}'".format(agg._type.__class__))
 
     if agg._aggregations:
-        raise ValueError('cannot aggregate an already-aggregated expression')
+        raise ExpressionException('Cannot aggregate an already-aggregated expression')
 
     uid = Env._get_uid()
     ast = LambdaClassMethod('fraction', uid, agg._ast, Reference(uid))
-    return construct_expr(ast, TBoolean(), Indices(source=agg._indices.source), (Aggregation(agg._indices),),
-                          agg._joins)
+    return construct_expr(ast, TFloat64(), Indices(source=agg._indices.source),
+                          agg._aggregations.push(Aggregation(agg._indices, agg._refs)), agg._joins)
 
-
+@typecheck(expr=oneof(Aggregable, expr_any))
 def hardy_weinberg(expr):
     """Compute Hardy-Weinberg Equilbrium (HWE) p-value and heterozygosity ratio.
 
@@ -540,15 +592,15 @@ def hardy_weinberg(expr):
     .. doctest::
 
         >>> dataset_result = dataset.annotate_rows(
-        ...     hwe_eas = agg.hardy_weinberg(agg.filter(dataset.GT, dataset.pop == 'EAS')))
+        ...     hwe_eas = agg.hardy_weinberg(agg.filter(dataset.pop == 'EAS', dataset.GT)))
 
     Notes
     -----
     This method returns a struct expression with the following fields:
 
-    - `rExpectedHetFrequency` (:class:`hail.expr.types.TFloat64`) - Ratio of observed to
+    - `rExpectedHetFrequency` (:class:`.TFloat64`) - Ratio of observed to
       expected heterozygote frequency.
-    - `pHWE` (:class:`hail.expr.types.TFloat64`) - Hardy-Weinberg p-value.
+    - `pHWE` (:class:`.TFloat64`) - Hardy-Weinberg p-value.
 
     Hail computes the exact p-value with mid-p-value correction, i.e. the
     probability of a less-likely outcome plus one-half the probability of an
@@ -557,23 +609,23 @@ def hardy_weinberg(expr):
 
     Parameters
     ----------
-    expr : :class:`hail.expr.expression.CallExpression`
+    expr : :class:`.CallExpression`
         Call for which to compute Hardy-Weinberg statistics.
 
     Returns
     -------
-    :class:`hail.expr.expression.StructExpression`
+    :class:`.StructExpression`
         Struct expression with fields `rExpectedHetFrequency` and `pHWE`.
     """
     t = TStruct(['rExpectedHetFrequency', 'pHWE'], [TFloat64(), TFloat64()])
     agg = _to_agg(expr)
     if not isinstance(agg._type, TCall):
-        raise TypeError("aggregator 'hardy_weinberg' requires an expression of type 'TCall', found '{}'".format(
+        raise TypeError("aggregator 'hardy_weinberg' requires an expression of type 'Call', found '{}'".format(
             agg._type.__class__))
     return _agg_func('hardyWeinberg', agg, t)
 
 
-@typecheck(expr=oneof(expr_list, expr_set))
+@typecheck(expr=oneof(Aggregable, expr_list, expr_set))
 def explode(expr):
     """Explode an array or set expression to aggregate the elements of all records.
 
@@ -604,29 +656,31 @@ def explode(expr):
     Notes
     -----
     This method can be used with aggregator functions to aggregate the elements
-    of collection types (:class:`hail.expr.types.TArray` and :class:`hail.expr.types.TSet`).
+    of collection types (:class:`.TArray` and :class:`.TSet`).
 
     The result of the :meth:`explode` and :meth:`filter` methods is an
-    :class:`Aggregable` expression which can be used only in aggregator
+    :class:`.Aggregable` expression which can be used only in aggregator
     methods.
 
     Parameters
     ----------
-    expr : :class:`hail.expr.expression.CollectionExpression`
-        Expression of type :class:`hail.expr.types.TArray` or :class:`hail.expr.types.TSet`.
+    expr : :class:`.CollectionExpression`
+        Expression of type :class:`.TArray` or :class:`.TSet`.
 
     Returns
     -------
-    :class:`Aggregable`
+    :class:`.Aggregable`
         Aggregable expression.
     """
     agg = _to_agg(expr)
+    if not (isinstance(agg._type, TSet) or isinstance(agg._type, TArray)):
+        raise  TypeError("'explode' expects a 'Set' or 'Array' argument, found '{}'".format(agg._type))
     uid = Env._get_uid()
     return Aggregable(LambdaClassMethod('flatMap', uid, agg._ast, Reference(uid)),
-                      agg._type, agg._indices, agg._aggregations, agg._joins)
+                      agg._type.element_type, agg._indices, agg._aggregations, agg._joins, agg._refs)
 
-
-def filter(expr, condition):
+@typecheck(condition=oneof(expr_bool, func_spec(1, expr_bool)), expr=oneof(Aggregable, expr_any))
+def filter(condition, expr):
     """Filter records according to a predicate.
 
     Examples
@@ -635,7 +689,7 @@ def filter(expr, condition):
 
     .. doctest::
 
-        >>> table1.aggregate(high_ht = agg.collect(agg.filter(table1.ID, table1.HT >= 70)))
+        >>> table1.aggregate(high_ht = agg.collect(agg.filter(table1.HT >= 70, table1.ID)))
         Struct(high_ht=[2, 3])
 
     Notes
@@ -644,19 +698,19 @@ def filter(expr, condition):
     aggregation.
 
     The result of the :meth:`explode` and :meth:`filter` methods is an
-    :class:`Aggregable` expression which can be used only in aggregator
+    :class:`.Aggregable` expression which can be used only in aggregator
     methods.
 
     Parameters
     ----------
-    expr : :class:`hail.expr.expression.Expression`
-        Expression to filter.
-    condition : :class:`hail.expr.expression.BooleanExpression` or function
+    condition : :class:`.BooleanExpression` or function ( (arg) -> :class:`.BooleanExpression`)
         Filter expression, or a function to evaluate for each record.
+    expr : :class:`.Expression`
+        Expression to filter.
 
     Returns
     -------
-    :class:`Aggregable`
+    :class:`.Aggregable`
         Aggregable expression.
     """
 
@@ -666,17 +720,17 @@ def filter(expr, condition):
     if callable(condition):
         lambda_result = to_expr(
             condition(
-                construct_expr(Reference(uid), agg._type, agg._indices, agg._aggregations, agg._joins)))
+                construct_expr(Reference(uid), agg._type, agg._indices, agg._aggregations, agg._joins, agg._refs)))
     else:
         lambda_result = to_expr(condition)
 
     if not isinstance(lambda_result._type, TBoolean):
         raise TypeError(
-            "'filter' expects the 'condition' argument to be or produce an expression of type 'TBoolean', found '{}'".format(
+            "'filter' expects the 'condition' argument to be or return an expression of type 'Boolean', found '{}'".format(
                 lambda_result._type.__class__))
-    indices, aggregations, joins = unify_all(agg, lambda_result)
+    indices, aggregations, joins, refs = unify_all(agg, lambda_result)
     ast = LambdaClassMethod('filter', uid, agg._ast, lambda_result._ast)
-    return Aggregable(ast, agg._type, indices, aggregations, joins)
+    return Aggregable(ast, agg._type, indices, aggregations, joins, refs)
 
 
 @typecheck(expr=oneof(Aggregable, expr_call), prior=expr_numeric)
@@ -722,41 +776,45 @@ def inbreeding(expr, prior):
 
     This method returns a struct expression with five fields:
 
-     - `Fstat` (:class:`hail.expr.types.TFloat64`): ``F``, the inbreeding coefficient.
-     - `nTotal` (:class:`hail.expr.types.TInt64`): Total number of calls.
-     - `nCalled` (:class:`hail.expr.types.TInt64`): ``N``, the number of non-missing calls.
-     - `expectedHoms` (:class:`hail.expr.types.TFloat64`): ``E``, the expected number of homozygotes.
-     - `observedHoms` (:class:`hail.expr.types.TInt64`): ``O``, the number of observed homozygotes.
+     - `Fstat` (:class:`.TFloat64`): ``F``, the inbreeding coefficient.
+     - `nTotal` (:class:`.TInt64`): Total number of calls.
+     - `nCalled` (:class:`.TInt64`): ``N``, the number of non-missing calls.
+     - `expectedHoms` (:class:`.TFloat64`): ``E``, the expected number of homozygotes.
+     - `observedHoms` (:class:`.TInt64`): ``O``, the number of observed homozygotes.
 
     Parameters
     ----------
-    expr : :class:`hail.expr.expression.CallExpression`
+    expr : :class:`.CallExpression`
         Call expression.
-    prior : :class:`hail.expr.expression.Float64Expression`
+    prior : :class:`.Float64Expression`
         Alternate allele frequency prior.
 
     Returns
     -------
-    :class:`hail.expr.expression.StructExpression`
+    :class:`.StructExpression`
         Struct expression with fields `Fstat`, `nTotal`, `nCalled`, `expectedHoms`, `observedHoms`.
     """
     agg = _to_agg(expr)
-    prior = to_expr(prior)
 
     if not isinstance(agg._type, TCall):
         raise TypeError("aggregator 'inbreeding' requires an expression of type 'TCall', found '{}'".format(
             agg._type.__class__))
 
+    if isinstance(prior._type, TFloat32):
+        prior = prior.to_float64()
+    if not isinstance(prior._type, TFloat64):
+        raise TypeError("'inbreeding' expects 'prior' to be type 'Float32' or 'Float64', found '{}'".format(prior._type))
+
     uid = Env._get_uid()
     ast = LambdaClassMethod('inbreeding', uid, agg._ast, prior._ast)
 
-    indices, aggregations, joins = unify_all(agg, prior)
+    indices, aggregations, joins, refs = unify_all(agg, prior)
     if aggregations:
-        raise ValueError('cannot aggregate an already-aggregated expression')
+        raise ExpressionException('Cannot aggregate an already-aggregated expression')
 
     t = TStruct(['Fstat', 'nTotal', 'nCalled', 'expectedHoms', 'observedHoms'],
                 [TFloat64(), TInt64(), TInt64(), TFloat64(), TInt64()])
-    return construct_expr(ast, t, Indices(source=indices.source), (Aggregation(indices),), joins)
+    return construct_expr(ast, t, Indices(source=indices.source), aggregations.push(Aggregation(indices, refs)), joins)
 
 
 @typecheck(expr=oneof(Aggregable, expr_call), variant=expr_variant)
@@ -795,26 +853,26 @@ def call_stats(expr, variant):
 
     This method returns a struct expression with four fields:
 
-     - `AC` (:class:`hail.expr.types.TArray` of :class:`hail.expr.types.TInt32`) - Allele counts. One element
+     - `AC` (:class:`.TArray` of :class:`.TInt32`) - Allele counts. One element
        for each allele, including the reference.
-     - `AF` (:class:`hail.expr.types.TArray` of :class:`hail.expr.types.TFloat64`) - Allele frequencies. One
+     - `AF` (:class:`.TArray` of :class:`.TFloat64`) - Allele frequencies. One
        element for each allele, including the reference.
-     - `AN` (:class:`hail.expr.types.TInt32`) - Allele number. The total number of called
+     - `AN` (:class:`.TInt32`) - Allele number. The total number of called
        alleles, or the number of non-missing calls * 2.
-     - `GC` (:class:`hail.expr.types.TArray` of :class:`hail.expr.types.TInt32`) - Genotype counts. One element
+     - `GC` (:class:`.TArray` of :class:`.TInt32`) - Genotype counts. One element
        for each possible biallelic configuration (see
-       :meth:`hail.expr.expression.VariantExpression.num_genotypes`).
+       :meth:`.VariantExpression.num_genotypes`).
 
     Parameters
     ----------
-    expr : :class:`hail.expr.expression.CallExpression`
+    expr : :class:`.CallExpression`
         Call.
-    variant : :class:`hail.expr.expression.VariantExpression`
+    variant : :class:`.VariantExpression`
         Variant.
 
     Returns
     -------
-    :class:`hail.expr.expression.StructExpression`
+    :class:`.StructExpression`
         Struct expression with fields `AC`, `AF`, `AN`, and `GC`.
     """
     agg = _to_agg(expr)
@@ -827,15 +885,15 @@ def call_stats(expr, variant):
             agg._type.__class__))
 
     ast = LambdaClassMethod('callStats', uid, agg._ast, variant._ast)
-    indices, aggregations, joins = unify_all(agg, variant)
+    indices, aggregations, joins, refs = unify_all(agg, variant)
 
     if aggregations:
-        raise ValueError('cannot aggregate an already-aggregated expression')
+        raise ExpressionException('Cannot aggregate an already-aggregated expression')
 
     t = TStruct(['AC', 'AF', 'AN', 'GC'], [TArray(TInt32()), TArray(TFloat64()), TInt32(), TArray(TInt32())])
-    return construct_expr(ast, t, Indices(source=indices.source), (Aggregation(indices),), joins)
+    return construct_expr(ast, t, Indices(source=indices.source), aggregations.push(Aggregation(indices, refs)), joins)
 
-
+@typecheck(expr=oneof(Aggregable, expr_numeric), start=numeric, end=numeric, bins=numeric)
 def hist(expr, start, end, bins):
     """Compute binned counts of a numeric expression.
 
@@ -855,34 +913,35 @@ def hist(expr, start, end, bins):
     -----
     This method returns a struct expression with four fields:
 
-     - `binEdges` (:class:`hail.expr.types.TArray` of :class:`hail.expr.types.TFloat64`): Bin edges. Bin `i`
+     - `binEdges` (:class:`.TArray` of :class:`.TFloat64`): Bin edges. Bin `i`
        contains values in the left-inclusive, right-exclusive range
        ``[ binEdges[i], binEdges[i+1] )``.
-     - `binFrequencies` (:class:`hail.expr.types.TArray` of :class:`hail.expr.types.TInt64`): Bin
+     - `binFrequencies` (:class:`.TArray` of :class:`.TInt64`): Bin
        frequencies. The number of records found in each bin.
-     - `nLess` (:class:`hail.expr.types.TInt64`): The number of records smaller than the start
+     - `nLess` (:class:`.TInt64`): The number of records smaller than the start
        of the first bin.
-     - `nGreater` (:class:`hail.expr.types.TInt64`): The number of records larger than the end
+     - `nGreater` (:class:`.TInt64`): The number of records larger than the end
        of the last bin.
 
     Parameters
     ----------
-    expr : :class:`hail.expr.expression.NumericExpression`
+    expr : :class:`.NumericExpression`
         Target numeric expression.
-    start : :class:`hail.expr.expression.Float64Expression`
+    start : :obj:`int` or :obj:`float`
         Start of histogram range.
-    end : :class:`hail.expr.expression.Float64Expression`
+    end : :obj:`int` or :obj:`float`
         End of histogram range.
-    bins : :class:`hail.expr.expression.Int32Expression`
+    bins : :obj:`int` or :obj:`float`
         Number of bins.
 
     Returns
     -------
-    :class:`hail.expr.expression.StructExpression`
+    :class:`.StructExpression`
         Struct expression with fields `binEdges`, `binFrequencies`, `nLess`, and `nGreater`.
     """
     agg = _to_agg(expr)
-    # FIXME check types
+    if not is_numeric(agg._type):
+        raise TypeError("'hist' expects argument 'expr' to be a numeric type, found '{}'".format(agg._type))
     t = TStruct(['binEdges', 'binFrequencies', 'nLess', 'nGreater'],
                 [TArray(TFloat64()), TArray(TInt64()), TInt64(), TInt64()])
     return _agg_func('hist', agg, t, start, end, bins)

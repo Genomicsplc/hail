@@ -1,7 +1,7 @@
 package is.hail.stats
 
 import is.hail.annotations.Annotation
-import is.hail.expr._
+import is.hail.expr.types._
 import is.hail.utils._
 import is.hail.variant.{Call, Genotype, Variant}
 
@@ -26,12 +26,10 @@ class CallStatsCombiner(val v: Variant) extends Serializable {
   val genotypeCount = new Array[Int](v.nGenotypes)
 
   def merge(gt: Call): CallStatsCombiner = {
-    if (gt != null) {
-      val p = Genotype.gtPair(gt)
-      alleleCount(p.j) += 1
-      alleleCount(p.k) += 1
-      genotypeCount(gt) += 1
-    }
+    val p = Genotype.gtPair(gt)
+    alleleCount(p.j) += 1
+    alleleCount(p.k) += 1
+    genotypeCount(gt) += 1
     this
   }
 

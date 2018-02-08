@@ -1,9 +1,13 @@
 from __future__ import print_function  # Python 2 and 3 print compatibility
 
+from __future__ import absolute_import
 import unittest
 
 from hail import HailContext
 from hail.utils import *
+from .linkedlist import LinkedList
+from six.moves import map
+from six.moves import range
 
 hc = None
 
@@ -19,7 +23,7 @@ def tearDownModule():
 class Tests(unittest.TestCase):
     def test_hadoop_methods(self):
         data = ['foo', 'bar', 'baz']
-        data.extend(map(str, range(100)))
+        data.extend(list(map(str, list(range(100)))))
 
         with hadoop_write('/tmp/test_out.txt') as f:
             for d in data:
@@ -58,3 +62,39 @@ class Tests(unittest.TestCase):
 
         self.assertEqual(b, b2)
 
+    def test_linked_list(self):
+        ll = LinkedList(int)
+        self.assertEqual(list(ll), [])
+        if ll:
+            self.fail('empty linked list had an implicit boolean value of True')
+
+        ll2 = ll.push(5).push(2)
+
+        self.assertEqual(list(ll2), [2, 5])
+
+        if not ll2:
+            self.fail('populated linked list had an implicit boolean value of False')
+
+        ll3 = ll.push(5, 2)
+        self.assertEqual(list(ll2), list(ll3))
+        self.assertEqual(ll2, ll3)
+
+        ll4 = ll.push(1)
+        ll5 = ll4.push(2, 3)
+        ll6 = ll4.push(4, 5)
+
+        self.assertEqual(list(ll5), [3, 2, 1])
+        self.assertEqual(list(ll6), [5, 4, 1])
+
+    def test_struct_ops(self):
+        s = Struct(a=1, b=2, c=3)
+
+        self.assertEqual(s.drop('c'), Struct(b=2, a=1))
+        self.assertEqual(s.drop('b', 'c'), Struct(a=1))
+
+        self.assertEqual(s.select('b', 'a'), Struct(b=2, a=1))
+        self.assertEqual(s.select('a', b=5), Struct(a=1, b=5))
+
+        self.assertEqual(s.annotate(), s)
+        self.assertEqual(s.annotate(x=5), Struct(a=1, b=2, c=3, x=5))
+        self.assertEqual(s.annotate(**{'a': 5, 'x': 10, 'y': 15}), Struct(a=5, b=2, c=3, x=10, y=15))

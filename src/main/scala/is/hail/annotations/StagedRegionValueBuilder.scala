@@ -4,6 +4,7 @@ import is.hail.asm4s.{AsmFunction2, Code, FunctionBuilder}
 import is.hail.asm4s.Code._
 import is.hail.asm4s._
 import is.hail.expr._
+import is.hail.expr.types._
 import is.hail.utils._
 import org.objectweb.asm.tree.{AbstractInsnNode, IincInsnNode}
 
@@ -79,7 +80,8 @@ class StagedRegionValueBuilder private(val fb: FunctionBuilder[_], val typ: Type
     else
       startOffset.store(pOffset)
     assert(staticIdx == 0)
-    c = Code(c, elementsOffset.store(startOffset + t.byteOffsets(0)))
+    if (t.size > 0)
+      c = Code(c, elementsOffset.store(startOffset + t.byteOffsets(0)))
     if (init)
       c = Code(c, t.clearMissingBits(region, startOffset))
     c

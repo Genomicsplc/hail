@@ -3,6 +3,7 @@ package is.hail.methods
 import breeze.linalg._
 import is.hail.annotations._
 import is.hail.expr._
+import is.hail.expr.types._
 import is.hail.stats._
 import is.hail.utils._
 import is.hail.variant._
@@ -34,9 +35,10 @@ object LogisticRegression {
     val d = n - k - 1
 
     if (d < 1)
-      fatal(s"$n samples and $k ${ plural(k, "covariate") } including intercept implies $d degrees of freedom.")
+      fatal(s"$n samples and ${ k + 1 } ${ plural(k, "covariate") } (including x and intercept) implies $d degrees of freedom.")
 
-    info(s"Running $test logistic regression on $n samples with $k ${ plural(k, "covariate") } including intercept...")
+    info(s"logreg: running $test logistic regression on $n samples for response variable y,\n"
+       + s"    with input variable x, intercept, and ${ k - 1 } additional ${ plural(k - 1, "covariate") }...")
 
     val nullModel = new LogisticRegressionModel(cov, y)
     val nullFit = nullModel.fit()
@@ -63,9 +65,9 @@ object LogisticRegression {
     val pathVA = Parser.parseAnnotationRoot(root, Annotation.VARIANT_HEAD)
 
     val (newRVDType, inserter) = vsm.rdd2.typ.insert(logRegTest.schema, "va" :: pathVA)
-    val newVAType = newRVDType.rowType.fieldType(2)
+    val newVAType = newRVDType.rowType.fieldType(2).asInstanceOf[TStruct]
 
-    val localRowType = vsm.rowType
+    val localRowType = vsm.rvRowType
     val newRVD = vsm.rdd2.mapPartitionsPreservesPartitioning(newRVDType) { it =>
       val rvb = new RegionValueBuilder()
       val rv2 = RegionValue()

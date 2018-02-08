@@ -2,6 +2,7 @@ package is.hail.annotations
 
 import is.hail.SparkSuite
 import is.hail.expr._
+import is.hail.expr.types._
 import is.hail.methods.SplitMulti
 import is.hail.utils._
 import is.hail.testUtils._
@@ -269,16 +270,6 @@ class AnnotationsSuite extends SparkSuite {
     assert(vds.variantsAndAnnotations
       .collect()
       .forall { case (v, va) => va == Annotation("test") })
-
-    // remap the head
-    val toAdd8 = "dummy"
-    val toAdd8Sig = TString()
-    val (s11, i8) = vds.insertVA(toAdd8Sig, List[String]())
-    vds = vds.mapAnnotations(s11, (v, va, gs) => i8(va, toAdd8))
-
-    assert(vds.vaSignature.schema == toAdd8Sig.schema)
-    assert(vds.variantsAndAnnotations.collect()
-      .forall { case (v, va) => va == "dummy" })
   }
 
   @Test def testWeirdNamesReadWrite() {
@@ -290,5 +281,28 @@ class AnnotationsSuite extends SparkSuite {
     vds.write(f)
 
     assert(hc.readVDS(f).same(vds))
+  }
+
+  @Test def testExtendedOrdering() {
+    val ord = ExtendedOrdering.extendToNull(implicitly[Ordering[Int]])
+    val rord = ord.reverse
+
+    assert(ord.lt(5, 7))
+    assert(ord.lt(5, null))
+    assert(ord.gt(null, 7))
+    assert(ord.equiv(3, 3))
+    assert(ord.equiv(null, null))
+    assert(ord.max(5, 7) == 7)
+    assert(ord.max(5, null) == null)
+    assert(ord.min(5, 7) == 5)
+    assert(ord.min(5, null) == 5)
+
+    assert(rord.gt(5, 7))
+    assert(rord.lt(5, null))
+    assert(rord.gt(null, 7))
+    assert(rord.max(5, 7) == 5)
+    assert(rord.max(5, null) == null)
+    assert(rord.min(5, 7) == 7)
+    assert(rord.min(5, null) == 5)
   }
 }

@@ -3,7 +3,7 @@ package is.hail.variant
 import java.util.zip.DataFormatException
 
 import is.hail.annotations.{Region, RegionValue, UnsafeRow, UnsafeUtils}
-import is.hail.expr._
+import is.hail.expr.types._
 import is.hail.utils._
 
 object HTSGenotypeView {
@@ -117,8 +117,8 @@ object ArrayGenotypeView {
   val tArrayFloat64 = TArray(TFloat64())
 }
 
-final class ArrayGenotypeView(rowType: TStruct) {
-  private val tgs = rowType.fieldType(3).asInstanceOf[TArray]
+final class ArrayGenotypeView(rvRowType: TStruct) {
+  private val tgs = rvRowType.fieldType(3).asInstanceOf[TArray]
   private val tg = tgs.elementType match {
     case tg: TStruct => tg
     case _ => null
@@ -150,7 +150,7 @@ final class ArrayGenotypeView(rowType: TStruct) {
 
   def setRegion(mb: Region, offset: Long) {
     this.m = mb
-    gsOffset = rowType.loadField(m, offset, 3)
+    gsOffset = rvRowType.loadField(m, offset, 3)
     gsLength = tgs.loadLength(m, gsOffset)
   }
 
@@ -189,8 +189,8 @@ object HardCallView {
   }
 }
 
-final class HardCallView(rowType: TStruct, callField: String) {
-  private val tgs = rowType.fieldType(3).asInstanceOf[TArray]
+final class HardCallView(rvRowType: TStruct, callField: String) {
+  private val tgs = rvRowType.fieldType(3).asInstanceOf[TArray]
   private val tg = tgs.elementType match {
     case tg: TStruct => tg
     case _ => null
@@ -221,7 +221,7 @@ final class HardCallView(rowType: TStruct, callField: String) {
 
   def setRegion(mb: Region, offset: Long) {
     this.m = mb
-    gsOffset = rowType.loadField(m, offset, 3)
+    gsOffset = rvRowType.loadField(m, offset, 3)
     gsLength = tgs.loadLength(m, gsOffset)
   }
 
@@ -236,6 +236,7 @@ final class HardCallView(rowType: TStruct, callField: String) {
   def hasGT: Boolean = gtExists && gIsDefined && tg.isFieldDefined(m, gOffset, gtIndex)
 
   def getGT: Int = {
+    assert(gtExists && gIsDefined)
     val callOffset = tg.loadField(m, gOffset, gtIndex)
     val gt = m.loadInt(callOffset)
     if (gt < 0)

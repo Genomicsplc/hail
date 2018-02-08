@@ -1,7 +1,10 @@
+from __future__ import absolute_import
 from hail.genetics.genomeref import GenomeReference
 from hail.history import *
 from hail.typecheck import *
 from hail.utils.java import scala_object, handle_py4j, Env
+from six.moves import map
+from six.moves import range
 
 
 class Variant(HistoryMixin):
@@ -19,7 +22,7 @@ class Variant(HistoryMixin):
     :param str ref: reference allele
     :param alts: single alternate allele, or list of alternate alleles
     :type alts: str or list of str
-    :param reference_genome: Reference genome to use. Default is :py:meth:`hail.api1.HailContext.default_reference`.
+    :param reference_genome: Reference genome to use. Default is :meth:`hail.api1.HailContext.default_reference`.
     :type reference_genome: :class:`.GenomeReference`
     """
 
@@ -33,12 +36,12 @@ class Variant(HistoryMixin):
     def __init__(self, contig, start, ref, alts, reference_genome=None):
         if isinstance(contig, int):
             contig = str(contig)
-        jrep = scala_object(Env.hail().variant, 'Variant').apply(contig, start, ref, alts)
+        self._rg = reference_genome if reference_genome else Env.hc().default_reference
+        jrep = scala_object(Env.hail().variant, 'Variant').apply(contig, start, ref, alts, self._rg._jrep)
         self._init_from_java(jrep)
         self._contig = contig
         self._start = start
         self._ref = ref
-        self._rg = reference_genome if reference_genome else Env.hc().default_reference
 
     def __str__(self):
         return self._jrep.toString()
@@ -54,7 +57,7 @@ class Variant(HistoryMixin):
 
     def _init_from_java(self, jrep):
         self._jrep = jrep
-        self._alt_alleles = [AltAllele._from_java(jrep.altAlleles().apply(i)) for i in range(jrep.nAltAlleles())]
+        self._alt_alleles = list(map(AltAllele._from_java, [jrep.altAlleles().apply(i) for i in range(jrep.nAltAlleles())]))
 
     @classmethod
     def _from_java(cls, jrep, reference_genome):
@@ -64,6 +67,7 @@ class Variant(HistoryMixin):
         v._start = jrep.start()
         v._ref = jrep.ref()
         v._rg = reference_genome
+        reference_genome._check_variant(jrep)
         super(Variant, v).__init__()
         return v
 
@@ -83,13 +87,13 @@ class Variant(HistoryMixin):
         >>> v_multiallelic = Variant.parse('16:12311:T:C,TTT,A')
 
         :param str string: String to parse.
-        :param reference_genome: Reference genome to use. Default is :py:meth:`hail.api1.HailContext.default_reference`.
+        :param reference_genome: Reference genome to use. Default is :meth:`hail.api1.HailContext.default_reference`.
         :type reference_genome: :class:`.GenomeReference`
 
         :rtype: :class:`.Variant`
         """
         rg = reference_genome if reference_genome else Env.hc().default_reference
-        jrep = scala_object(Env.hail().variant, 'Variant').parse(string)
+        jrep = scala_object(Env.hail().variant, 'Variant').parse(string, rg._jrep)
         return Variant._from_java(jrep, rg)
 
     @property
@@ -230,54 +234,66 @@ class Variant(HistoryMixin):
         """
         return Locus._from_java(self._jrep.locus(), self._rg)
 
-    def is_autosomal_or_pseudoautosomal(self):
-        """True if this polymorphism is found on an autosome, or the PAR on X or Y.
-
-        :rtype: bool
-        """
-        return self._jrep.isAutosomalOrPseudoAutosomal(self._rg._jrep)
-
-    def is_autosomal(self):
-        """True if this polymorphism is located on an autosome.
+    def in_autosome(self):
+        """True if this polymorphism is on an autosome.
+        
+        Notes
+        -----
+        All contigs are considered autosomal except those
+        designated as X, Y, or MT by :class:`.GenomeReference`.
 
         :rtype: bool
         """
         return self._jrep.isAutosomal(self._rg._jrep)
 
-    def is_mitochondrial(self):
-        """True if this polymorphism is mapped to mitochondrial DNA.
+    def in_autosome_or_par(self):
+        """True if this polymorphism is on an autosome or a pseudoautosomal
+        region of chromosome X or Y.
+
+        :rtype: bool
+        """
+        return self._jrep.isAutosomalOrPseudoAutosomal(self._rg._jrep)
+
+    def in_mito(self):
+        """True if this polymorphism is on mitochondrial DNA.
 
         :rtype: bool
         """
 
         return self._jrep.isMitochondrial(self._rg._jrep)
 
-    def in_X_PAR(self):
-        """True of this polymorphism is found on the pseudoautosomal region of chromosome X.
+    def in_x_par(self):
+        """True if this polymorphism is on a pseudoautosomal region of chromosome X.
 
         :rtype: bool
         """
 
         return self._jrep.inXPar(self._rg._jrep)
 
-    def in_Y_PAR(self):
-        """True of this polymorphism is found on the pseudoautosomal region of chromosome Y.
+    def in_y_par(self):
+        """True if this polymorphism is on a pseudoautosomal region of chromosome Y.
+
+        Note
+        ----
+        Many variant callers only generate variants on chromosome X for the
+        pseudoautosomal region. In this case, all variants mapped to chromosome
+        Y are non-pseudoautosomal.
 
         :rtype: bool
         """
 
         return self._jrep.inYPar(self._rg._jrep)
 
-    def in_X_non_PAR(self):
-        """True of this polymorphism is found on the non-pseudoautosomal region of chromosome X.
+    def in_x_nonpar(self):
+        """True if this polymorphism is on a non-pseudoautosomal region of chromosome X.
 
         :rtype: bool
         """
 
         return self._jrep.inXNonPar(self._rg._jrep)
 
-    def in_Y_non_PAR(self):
-        """True of this polymorphism is found on the non-pseudoautosomal region of chromosome Y.
+    def in_y_nonpar(self):
+        """True if this polymorphism is on a non-pseudoautosomal region of chromosome Y.
 
         :rtype: bool
         """
@@ -460,7 +476,7 @@ class Locus(HistoryMixin):
     :param contig: chromosome identifier
     :type contig: str or int
     :param int position: chromosomal position (1-indexed)
-    :param reference_genome: Reference genome to use. Default is :py:meth:`hail.api1.HailContext.default_reference`.
+    :param reference_genome: Reference genome to use. Default is :meth:`hail.api1.HailContext.default_reference`.
     :type reference_genome: :class:`.GenomeReference`
     """
 
@@ -472,11 +488,11 @@ class Locus(HistoryMixin):
     def __init__(self, contig, position, reference_genome=None):
         if isinstance(contig, int):
             contig = str(contig)
-        jrep = scala_object(Env.hail().variant, 'Locus').apply(contig, position)
+        self._rg = reference_genome if reference_genome else Env.hc().default_reference
+        jrep = scala_object(Env.hail().variant, 'Locus').apply(contig, position, self._rg._jrep)
         self._init_from_java(jrep)
         self._contig = contig
         self._position = position
-        self._rg = reference_genome if reference_genome else Env.hc().default_reference
 
     def __str__(self):
         return self._jrep.toString()
@@ -500,6 +516,7 @@ class Locus(HistoryMixin):
         l._contig = jrep.contig()
         l._position = jrep.position()
         l._rg = reference_genome
+        reference_genome._check_locus(jrep)
         super(Locus, l).__init__()
         return l
 
@@ -517,13 +534,13 @@ class Locus(HistoryMixin):
         >>> l2 = Locus.parse('X:4201230')
 
         :param str string: String to parse.
-        :param reference_genome: Reference genome to use. Default is :py:meth:`hail.api1.HailContext.default_reference`.
+        :param reference_genome: Reference genome to use. Default is :meth:`hail.api1.HailContext.default_reference`.
         :type reference_genome: :class:`.GenomeReference`
 
         :rtype: :class:`.Locus`
         """
         rg = reference_genome if reference_genome else Env.hc().default_reference
-        return Locus._from_java(scala_object(Env.hail().variant, 'Locus').parse(string), rg)
+        return Locus._from_java(scala_object(Env.hail().variant, 'Locus').parse(string, rg._jrep), rg)
 
     @property
     def contig(self):

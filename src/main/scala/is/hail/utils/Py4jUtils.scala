@@ -1,8 +1,12 @@
 package is.hail.utils
 
 import java.io.{InputStream, OutputStream}
+import java.net.URI
 
+import breeze.linalg.{DenseMatrix => BDM, _}
 import is.hail.HailContext
+import is.hail.annotations.{Memory, Region, RegionValueBuilder}
+import is.hail.expr.types._
 import is.hail.table.Table
 import is.hail.variant.{GenomeReference, Locus, MatrixTable}
 
@@ -23,16 +27,16 @@ trait Py4jUtils {
     list
   }
 
-  def parseIntervalList(strs: java.util.ArrayList[String], gr: GenomeReference): IntervalTree[Locus, Unit] = {
-    implicit val locusOrd = gr.locusOrdering
-    IntervalTree(Locus.parseIntervals(strs.asScala.toArray, gr))
+  def bdmGetBytes(bdm: BDM[Double], start: Int, n: Int): Array[Byte] = {
+    assert(8L * n < Integer.MAX_VALUE)
+    assert(bdm.offset == 0)
+    assert(bdm.majorStride == (if (bdm.isTranspose) bdm.cols else bdm.rows))
+    val buf = new Array[Byte](8 * n)
+    Memory.memcpy(buf, 0, bdm.data, start, n)
+    buf
   }
 
-
-  def makeIntervalList(intervals: java.util.ArrayList[Interval[Locus]], gr: GenomeReference): IntervalTree[Locus, Unit] = {
-    implicit val locusOrd = gr.locusOrdering
-    IntervalTree(intervals.asScala.toArray)
-  }
+  def getURI(uri: String): String = new URI(uri).getPath
 
   // we cannot construct an array because we don't have the class tag
   def arrayListToISeq[T](al: java.util.ArrayList[T]): IndexedSeq[T] = al.asScala.toIndexedSeq
@@ -61,6 +65,10 @@ trait Py4jUtils {
 
   def readFile(path: String, hc: HailContext): HadoopPyReader = hc.hadoopConf.readFile(path) { in =>
     new HadoopPyReader(hc.hadoopConf.unsafeReader(path))
+  }
+
+  def readBinaryFile(path: String, hc: HailContext): HadoopPyBinaryReader = hc.hadoopConf.readFile(path) { in =>
+    new HadoopPyBinaryReader(hc.hadoopConf.unsafeReader(path))
   }
 
   def writeFile(path: String, hc: HailContext): HadoopPyWriter = {
@@ -119,6 +127,25 @@ class HadoopPyReader(in: InputStream) {
       new String(b, "ISO-8859-1")
     else
       new String(b.slice(0, bytesRead), "ISO-8859-1")
+  }
+
+  def close() {
+    in.close()
+  }
+}
+
+class HadoopPyBinaryReader(in: InputStream) {
+  var eof = false
+
+  def read(n: Int): Array[Byte] = {
+    val b = new Array[Byte](n)
+    val bytesRead = in.read(b, 0, n)
+    if (bytesRead < 0)
+      new Array[Byte](0)
+    else if (bytesRead == n)
+      b
+    else
+      b.slice(0, bytesRead)
   }
 
   def close() {

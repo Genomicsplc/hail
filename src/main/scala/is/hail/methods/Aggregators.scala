@@ -3,9 +3,10 @@ package is.hail.methods
 import java.io.{ObjectInputStream, ObjectOutputStream}
 
 import is.hail.HailContext
-import is.hail.annotations.{Annotation, RegionValue, RegionValueBuilder, UnsafeRow}
+import is.hail.annotations._
 import is.hail.expr._
 import is.hail.table.TableLocalValue
+import is.hail.expr.types._
 import is.hail.stats._
 import is.hail.utils._
 import is.hail.variant._
@@ -24,7 +25,7 @@ object Aggregators {
   // keyMap is just a mapping of sampleIds.map { s => newKey(s) }
   def buildVariantAggregationsByKey(sc: SparkContext,
     typ: MatrixType,
-    localValue: VSMLocalValue,
+    localValue: MatrixLocalValue,
     nKeys: Int,
     keyMap: Array[Int],
     ec: EvalContext): (RegionValue) => Array[() => Unit] = {
@@ -38,7 +39,7 @@ object Aggregators {
     val localSamplesBc = sc.broadcast(localValue.sampleIds)
     val localAnnotationsBc = sc.broadcast(localValue.sampleAnnotations)
     val localGlobalAnnotations = localValue.globalAnnotation
-    val localRowType = typ.rowType
+    val localRowType = typ.rvRowType
 
     { (rv: RegionValue) =>
       val ur = new UnsafeRow(localRowType, rv.region, rv.offset)
@@ -91,7 +92,7 @@ object Aggregators {
 
   def buildVariantAggregations(sc: SparkContext,
     typ: MatrixType,
-    localValue: VSMLocalValue,
+    localValue: MatrixLocalValue,
     ec: EvalContext): Option[(RegionValue) => Unit] = {
 
     val aggregations = ec.aggregations
@@ -103,7 +104,7 @@ object Aggregators {
     val localSamplesBc = sc.broadcast(localValue.sampleIds)
     val localAnnotationsBc = sc.broadcast(localValue.sampleAnnotations)
     val localGlobalAnnotations = localValue.globalAnnotation
-    val localRowType = typ.rowType
+    val localRowType = typ.rvRowType
 
     Some({ (rv: RegionValue) =>
       val ur = new UnsafeRow(localRowType, rv.region, rv.offset)
@@ -163,7 +164,7 @@ object Aggregators {
       baseArray.update(i, j, aggregations(j)._3.copy())
     }
 
-    val localRowType = value.typ.rowType
+    val localRowType = value.typ.rvRowType
 
     val result = value.rdd2.treeAggregate(baseArray)({ case (arr, rv) =>
       val ur = new UnsafeRow(localRowType, rv.region, rv.offset)
@@ -298,7 +299,7 @@ object Aggregators {
     seqOp: (MultiArray2[Aggregator], UnsafeRow) => MultiArray2[Aggregator],
     combOp: (MultiArray2[Aggregator], MultiArray2[Aggregator]) => MultiArray2[Aggregator],
     resultOp: (MultiArray2[Aggregator], RegionValueBuilder) => Unit,
-    resultType: Type)
+    resultType: TStruct)
 
   def makeFunctions[T](ec: EvalContext, setEC: (EvalContext, T) => Unit): (Array[Aggregator],
     (Array[Aggregator], T) => Array[Aggregator],
@@ -712,7 +713,7 @@ class CallStatsAggregator(variantF: (Any) => Any)
         combiner = new CallStatsCombiner(v.asInstanceOf[Variant])
     }
 
-    if (combiner != null)
+    if (combiner != null && x != null)
       combiner.merge(x.asInstanceOf[Call])
   }
 
@@ -768,7 +769,7 @@ class TakeByAggregator[T](var t: Type, var f: (Any) => Any, var n: Int)(implicit
 
   def makeOrd(): Ordering[(Any, Any)] =
     if (tord != null)
-      extendOrderingToNull(true)(tord)
+      ExtendedOrdering.extendToNull(tord).toOrdering
         .on { case (e, k) => k.asInstanceOf[T] }
     else
       null

@@ -1,3 +1,4 @@
+from __future__ import absolute_import
 from hail.api1.context import HailContext
 from hail.api1.dataset import VariantDataset
 from hail.api1.keytable import KeyTable

@@ -1,15 +1,15 @@
 package is.hail.variant.vsm
 
 import is.hail.SparkSuite
-import is.hail.expr.{TArray, TCall, TFloat64, TInt32, TInt64, TStruct}
 import is.hail.io.annotators.IntervalList
 import org.testng.annotations.Test
 import is.hail.TestUtils._
 import is.hail.annotations.UnsafeRow
 import is.hail.check.Prop.forAll
+import is.hail.expr.types._
 import is.hail.utils._
-import is.hail.variant.{VSMSubgen, MatrixTable}
-
+import is.hail.testUtils._
+import is.hail.variant.{MatrixTable, VSMSubgen}
 
 class GroupBySuite extends SparkSuite {
 
@@ -73,7 +73,7 @@ class GroupBySuite extends SparkSuite {
       types = Map("Pheno" -> TFloat64()), missing = "0").keyBy("Sample")
 
     val vds = hc.importVCF("src/test/resources/regressionLinear.vcf")
-      .annotateVariantsTable(intervals, root="va.genes", product=true)
+      .annotateVariantsTable(intervals, expr="va.genes = table.map(x => x.target)", product=true)
       .annotateVariantsExpr("va.weight = v.start.toFloat64")
       .annotateSamplesTable(covariates, root = "sa.cov")
       .annotateSamplesTable(phenotypes, root = "sa.pheno")

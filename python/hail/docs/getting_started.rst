@@ -44,6 +44,16 @@ to start a Jupyter Notebook server in the tutorials directory.
 
 You can now click on the "hail-overview" notebook to get started!
 
+In the future, if you want to run:
+
+ - Hail in Python use `hail`
+ 
+ - Hail in IPython use `ihail`
+ 
+ - Hail in a Jupyter Notebook use `jhail`
+ 
+Hail will not import correctly from a normal Python interpreter, a normal IPython interpreter, nor a normal Jupyter Notebook.
+
 Running on a Spark cluster
 ==========================
 
@@ -169,16 +179,16 @@ Building with other versions of Spark 2
 =======================================
 
 Hail should work with other versions of Spark 2.  To build against a
-different version, such as Spark 2.1.0, modify the above
+different version, such as Spark 2.2.0, modify the above
 instructions as follows:
 
  - Set the Spark version in the gradle command
 
    .. code-block:: text
 
-      ./gradlew -Dspark.version=2.1.0 shadowJar
+      ./gradlew -Dspark.version=2.2.0 shadowJar
 
- - ``SPARK_HOME`` should point to an installation of the desired version of Spark, such as *spark-2.1.0-bin-hadoop2.7*
+ - ``SPARK_HOME`` should point to an installation of the desired version of Spark, such as *spark-2.2.0-bin-hadoop2.7*
 
  - The version of the Py4J ZIP file in the hail alias must match the version in ``$SPARK_HOME/python/lib`` in your version of Spark.
 

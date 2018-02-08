@@ -3,6 +3,7 @@ package is.hail.io
 import is.hail.HailContext
 import is.hail.annotations._
 import is.hail.expr._
+import is.hail.expr.types._
 import is.hail.rvd.OrderedRVD
 import is.hail.utils._
 import is.hail.variant._
@@ -46,8 +47,9 @@ object LoadMatrix {
     keyExpr: String,
     nPartitions: Option[Int] = None,
     dropSamples: Boolean = false,
-    cellType: Type = TInt64(),
+    cellType: TStruct = TStruct("x" -> TInt64()),
     missingValue: String = "NA"): MatrixTable = {
+    require(cellType.size == 1, "cellType can only have 1 field")
 
     val sep = '\t'
     val nAnnotations = annotationTypes.length
@@ -87,14 +89,13 @@ object LoadMatrix {
       case (name, partition) => partition == 0 || fileByPartition(partition - 1) != name
     }.map { case (_, partition) => partition }.toSet
 
-    val matrixType = MatrixType(VSMMetadata(
-      sSignature = TString(),
-      vSignature = t,
-      vaSignature = annotationType,
-      genotypeSignature = cellType
-    ))
+    val matrixType = MatrixType(
+      sType = TString(),
+      vType = t,
+      vaType = annotationType,
+      genotypeType = cellType)
 
-    val keyType = matrixType.kType
+    val keyType = matrixType.orderedRVType.kType
 
     val rdd = lines.filter(l => l.value.nonEmpty)
       .mapPartitionsWithIndex { (i, it) =>
@@ -273,7 +274,7 @@ object LoadMatrix {
           val rowKey = f()
 
           region.clear()
-          rvb.start(matrixType.rowType)
+          rvb.start(matrixType.rvRowType)
           rvb.startStruct()
           rvb.addAnnotation(t, rowKey)
           rvb.addAnnotation(t, rowKey)
@@ -296,8 +297,9 @@ object LoadMatrix {
                      |    in file ${ fileByPartition(i) }""".stripMargin
                 )
               }
+              rvb.startStruct()
               missing = false
-              cellType match {
+              cellType.fields(0).typ match {
                 case _: TInt32 =>
                   val v = getInt(fileByPartition(i), rowKey, ii + nAnnotations)
                   if (missing) rvb.setMissing() else rvb.addInt(v)
@@ -314,6 +316,7 @@ object LoadMatrix {
                   val v = getString(fileByPartition(i), rowKey, ii + nAnnotations)
                   if (missing) rvb.setMissing() else rvb.addString(v)
               }
+              rvb.endStruct()
               ii += 1
             }
             if (off < line.length) {
@@ -332,8 +335,8 @@ object LoadMatrix {
       }
 
     new MatrixTable(hc,
-      matrixType.metadata,
-      VSMLocalValue(Annotation.empty,
+      matrixType,
+      MatrixLocalValue(Annotation.empty,
         sampleIds,
         Annotation.emptyIndexedSeq(sampleIds.length)),
       OrderedRVD(matrixType.orderedRVType, rdd, None, None))

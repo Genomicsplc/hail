@@ -1,3 +1,4 @@
+from __future__ import absolute_import
 from hail.history import *
 from hail.typecheck import *
 from hail.utils.java import Env

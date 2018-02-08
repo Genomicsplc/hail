@@ -3,6 +3,7 @@ package is.hail.io.plink
 import is.hail.HailContext
 import is.hail.annotations._
 import is.hail.expr._
+import is.hail.expr.types._
 import is.hail.io.vcf.LoadVCF
 import is.hail.rvd.OrderedRVD
 import is.hail.utils.StringEscapeUtils._
@@ -14,7 +15,7 @@ import org.apache.hadoop.io.LongWritable
 
 case class SampleInfo(sampleIds: Array[String], annotations: IndexedSeq[Annotation], signatures: TStruct)
 
-case class FamFileConfig(isQuantitative: Boolean = false,
+case class FamFileConfig(isQuantPheno: Boolean = false,
   delimiter: String = "\\t",
   missingValue: String = "NA")
 
@@ -49,9 +50,9 @@ object PlinkLoader {
 
     val delimiter = unescapeString(ffConfig.delimiter)
 
-    val phenoSig = if (ffConfig.isQuantitative) ("qPheno", TFloat64()) else ("isCase", TBoolean())
+    val phenoSig = if (ffConfig.isQuantPheno) ("quant_pheno", TFloat64()) else ("is_case", TBoolean())
 
-    val signature = TStruct(("famID", TString()), ("patID", TString()), ("matID", TString()), ("isFemale", TBoolean()), phenoSig)
+    val signature = TStruct(("fam_id", TString()), ("pat_id", TString()), ("mat_id", TString()), ("is_female", TBoolean()), phenoSig)
 
     val idBuilder = new ArrayBuilder[String]
     val structBuilder = new ArrayBuilder[Annotation]
@@ -78,7 +79,7 @@ object PlinkLoader {
         }
 
         val pheno1 =
-          if (ffConfig.isQuantitative)
+          if (ffConfig.isQuantPheno)
             pheno match {
               case ffConfig.missingValue => null
               case numericRegex() => pheno.toDouble
@@ -113,11 +114,12 @@ object PlinkLoader {
     bedPath: String,
     sampleIds: IndexedSeq[String],
     sampleAnnotations: IndexedSeq[Annotation],
-    sampleAnnotationSignature: Type,
+    sampleAnnotationSignature: TStruct,
     variants: Array[(Variant, String)],
     nPartitions: Option[Int] = None,
     a2Reference: Boolean = true,
-    gr: GenomeReference = GenomeReference.defaultReference): MatrixTable = {
+    gr: GenomeReference = GenomeReference.defaultReference,
+    dropChr0: Boolean = false): MatrixTable = {
 
     val sc = hc.sc
     val nSamples = sampleIds.length
@@ -128,34 +130,36 @@ object PlinkLoader {
     val rdd = sc.hadoopFile(bedPath, classOf[PlinkInputFormat], classOf[LongWritable], classOf[PlinkRecord],
       nPartitions.getOrElse(sc.defaultMinPartitions))
 
-    val metadata = VSMMetadata(
-      saSignature = sampleAnnotationSignature,
-      vaSignature = plinkSchema,
-      vSignature = TVariant(gr),
-      globalSignature = TStruct.empty(),
-      genotypeSignature = TStruct("GT" -> TCall()))
+    val matrixType = MatrixType(
+      saType = sampleAnnotationSignature,
+      vaType = plinkSchema,
+      vType = TVariant(gr),
+      genotypeType = TStruct("GT" -> TCall()))
 
-    val matrixType = MatrixType(metadata)
-    val kType = matrixType.kType
-    val rowType = matrixType.rowType
+    val kType = matrixType.orderedRVType.kType
+    val rowType = matrixType.rvRowType
 
     val fastKeys = rdd.mapPartitions { it =>
       val region = Region()
       val rvb = new RegionValueBuilder(region)
       val rv = RegionValue(region)
 
-      it.map { case (_, record) =>
+      it.flatMap { case (_, record) =>
         val (v, _) = variantsBc.value(record.getKey)
 
-        region.clear()
-        rvb.start(kType)
-        rvb.startStruct()
-        rvb.addAnnotation(kType.fieldType(0), v.locus) // locus/pk
-        rvb.addAnnotation(kType.fieldType(1), v)
-        rvb.endStruct()
+        if (dropChr0 && v.contig == "0")
+          None
+        else {
+          region.clear()
+          rvb.start(kType)
+          rvb.startStruct()
+          rvb.addAnnotation(kType.fieldType(0), v.locus) // locus/pk
+          rvb.addAnnotation(kType.fieldType(1), v)
+          rvb.endStruct()
 
-        rv.setOffset(rvb.end())
-        rv
+          rv.setOffset(rvb.end())
+          Some(rv)
+        }
       }
     }
 
@@ -164,27 +168,31 @@ object PlinkLoader {
       val rvb = new RegionValueBuilder(region)
       val rv = RegionValue(region)
 
-      it.map { case (_, record) =>
+      it.flatMap { case (_, record) =>
         val (v, rsid) = variantsBc.value(record.getKey)
 
-        region.clear()
-        rvb.start(rowType)
-        rvb.startStruct()
-        rvb.addAnnotation(rowType.fieldType(0), v.locus) // locus/pk
-        rvb.addAnnotation(rowType.fieldType(1), v)
-        rvb.startStruct()
-        rvb.addAnnotation(TString(), rsid)
-        rvb.endStruct()
-        record.getValue(rvb)
-        rvb.endStruct()
+        if (dropChr0 && v.contig == "0")
+          None
+        else {
+          region.clear()
+          rvb.start(rowType)
+          rvb.startStruct()
+          rvb.addAnnotation(rowType.fieldType(0), v.locus) // locus/pk
+          rvb.addAnnotation(rowType.fieldType(1), v)
+          rvb.startStruct()
+          rvb.addAnnotation(TString(), rsid)
+          rvb.endStruct()
+          record.getValue(rvb)
+          rvb.endStruct()
 
-        rv.setOffset(rvb.end())
-        rv
+          rv.setOffset(rvb.end())
+          Some(rv)
+        }
       }
     }
 
-    new MatrixTable(hc, metadata,
-      VSMLocalValue(globalAnnotation = Annotation.empty,
+    new MatrixTable(hc, matrixType,
+      MatrixLocalValue(globalAnnotation = Annotation.empty,
         sampleIds = sampleIds,
         sampleAnnotations = sampleAnnotations),
       OrderedRVD(matrixType.orderedRVType, rdd2, Some(fastKeys), None))
@@ -192,7 +200,7 @@ object PlinkLoader {
 
   def apply(hc: HailContext, bedPath: String, bimPath: String, famPath: String, ffConfig: FamFileConfig,
     nPartitions: Option[Int] = None, a2Reference: Boolean = true, gr: GenomeReference = GenomeReference.defaultReference,
-    contigRecoding: Map[String, String] = Map.empty[String, String]): MatrixTable = {
+    contigRecoding: Map[String, String] = Map.empty[String, String], dropChr0: Boolean = false): MatrixTable = {
     val (sampleInfo, signature) = parseFam(famPath, ffConfig, hc.hadoopConf)
     val nSamples = sampleInfo.length
     if (nSamples <= 0)
@@ -235,7 +243,7 @@ object PlinkLoader {
            |  Duplicate IDs: @1""".stripMargin, duplicateIds)
     }
 
-    val vds = parseBed(hc, bedPath, ids, annotations, signature, variants, nPartitions, a2Reference, gr)
+    val vds = parseBed(hc, bedPath, ids, annotations, signature, variants, nPartitions, a2Reference, gr, dropChr0)
     vds
   }
 

@@ -3,7 +3,7 @@ package is.hail.stats
 import is.hail.distributedmatrix.BlockMatrix.ops._
 import breeze.linalg.DenseMatrix
 import is.hail.annotations.UnsafeRow
-import is.hail.expr.TVariant
+import is.hail.expr.types.TVariant
 import is.hail.methods.KinshipMatrix
 import is.hail.utils._
 import is.hail.variant.{HardCallView, Locus, MatrixTable, Variant}
@@ -33,10 +33,6 @@ object ComputeRRM {
 
   def apply(vds: MatrixTable, forceBlock: Boolean = false, forceGramian: Boolean = false): KinshipMatrix = {
     info(s"rrm: Computing Realized Relationship Matrix...")
-
-    def scaleMatrix(matrix: Matrix, scalar: Double): Matrix = {
-      Matrices.dense(matrix.numRows, matrix.numCols, matrix.toArray.map(_ * scalar))
-    }
 
     val useBlock = (forceBlock, forceGramian) match {
       case (false, false) => vds.nSamples > 3000 // for small matrices, computeGramian fits in memory and runs faster than BlockMatrix product
@@ -79,7 +75,7 @@ object ToNormalizedRowMatrix {
   def apply(vds: MatrixTable): RowMatrix = {
     val n = vds.nSamples
 
-    val rowType = vds.rowType
+    val rowType = vds.rvRowType
     val rows = vds.rdd2.mapPartitions { it =>
       val view = HardCallView(rowType)
 
@@ -104,7 +100,7 @@ object ToNormalizedIndexedRowMatrix {
     assert(partStarts.length == vds.rdd2.getNumPartitions + 1)
     val partStartsBc = vds.sparkContext.broadcast(partStarts)
 
-    val rowType = vds.rowType
+    val rowType = vds.rvRowType
     val indexedRows = vds.rdd2.mapPartitionsWithIndex { case (i, it) =>
       val view = HardCallView(rowType)
 
@@ -120,48 +116,5 @@ object ToNormalizedIndexedRowMatrix {
     }.persist()
 
     new IndexedRowMatrix(indexedRows, partStarts.last, n)
-  }
-}
-
-// each row has mean 0, norm approx sqrt(n), variance approx 1, constant variants are included as zero vector
-object ToHWENormalizedIndexedRowMatrix {
-  def apply(vsm: MatrixTable): (Array[Variant], IndexedRowMatrix) = {
-    val rowType = vsm.rowType
-
-    val n = vsm.nSamples
-    // extra leading 0 from scanLeft
-    val variantsAndSizes = vsm.rdd2.mapPartitions { it =>
-      val tv = rowType.fields(1).typ.asInstanceOf[TVariant]
-      val ab = new ArrayBuilder[Variant]
-      var n = 0
-      it.foreach { rv =>
-        ab += Variant.fromRegionValue(rv.region, rowType.loadField(rv, 1))
-        n += 1
-      }
-      Iterator.single((n, ab.result()))
-    }.collect()
-
-    val variants = variantsAndSizes.flatMap(_._2)
-    val nVariants = variants.length
-
-    val partitionSizes = variantsAndSizes.map(_._1).scanLeft(0)(_ + _)
-    assert(partitionSizes.length == vsm.rdd2.getNumPartitions + 1)
-    val pSizeBc = vsm.sparkContext.broadcast(partitionSizes)
-
-    val indexedRows = vsm.rdd2.mapPartitionsWithIndex { case (i, it) =>
-      val view = HardCallView(rowType)
-
-      val partitionStartIndex = pSizeBc.value(i)
-      var indexInPartition = 0
-      it.flatMap { rv =>
-        view.setRegion(rv)
-        val row = RegressionUtils.normalizedHardCalls(view, n, useHWE = true, nVariants)
-          .map { a => IndexedRow(partitionStartIndex + indexInPartition, Vectors.dense(a)) }
-        indexInPartition += 1
-        row
-      }
-    }.persist()
-
-    (variants, new IndexedRowMatrix(indexedRows, nVariants, n))
   }
 }

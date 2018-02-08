@@ -1,3 +1,4 @@
+from __future__ import absolute_import
 import hail.expr.functions
 from .types import *
 from .expression import eval_expr, eval_expr_typed

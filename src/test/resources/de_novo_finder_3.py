@@ -124,6 +124,11 @@ becomes 100/30Mbp
 
 '''
 
+from __future__ import absolute_import
+from __future__ import print_function
+from six.moves import map
+from six.moves import range
+from six.moves import zip
 __version__ = 3.95
 __author__ = 'Kaitlin E. Samocha <ksamocha@fas.harvard.edu>'
 __date__ = 'March 10th, 2016'
@@ -177,8 +182,8 @@ csq_order = ["transcript_ablation",
              "feature_truncation",
              "intergenic_variant",
              ""]
-csq_order_dict = dict(zip(csq_order, range(len(csq_order))))
-rev_csq_order_dict = dict(zip(range(len(csq_order)), csq_order))
+csq_order_dict = dict(list(zip(csq_order, list(range(len(csq_order))))))
+rev_csq_order_dict = dict(list(zip(list(range(len(csq_order))), csq_order)))
 
 
 def trimfamily(Fam, labels):
@@ -214,7 +219,7 @@ def trimfamily(Fam, labels):
     who_dad = ['N' for i in range(9, len(labels))]
     who_mom = ['N' for i in range(9, len(labels))]
     for idx in range(9, len(labels)):
-        if idx in Fam2.keys():
+        if idx in list(Fam2.keys()):
             am_kid[idx - 9] = 'Y'
             (dad_pos, mom_pos, gender, aff_status) = Fam2[idx]
             who_dad[idx - 9] = dad_pos
@@ -240,9 +245,9 @@ def split_Fam(Fam_dict, labels):
             continue
 
     for idx in range(9, len(labels)):
-        if idx in fem_Fam.keys():
+        if idx in list(fem_Fam.keys()):
             female_kid[idx - 9] = 'Y'
-        elif idx in male_Fam.keys():
+        elif idx in list(male_Fam.keys()):
             male_kid[idx - 9] = 'Y'
         else:
             continue
@@ -255,7 +260,7 @@ def process_line(line, args):
 
     May not need to be its own function given the removal of -q in 3.93
     '''
-    (ref_allele, alt_allele, qual, filter_pos) = range(3, 7)
+    (ref_allele, alt_allele, qual, filter_pos) = list(range(3, 7))
     passedcheck = True
 
     if line[filter_pos] != 'PASS':
@@ -266,7 +271,7 @@ def process_line(line, args):
 
 def is_child(column, Fam):
     "Checks if the het entry is a child"
-    if column in Fam.keys():
+    if column in list(Fam.keys()):
         return (Fam[column][0], Fam[column][1])  # Should return the parents
 
     return None
@@ -350,7 +355,7 @@ def VEP_annotate(var_annotation, vep_field_names, alt_allele):
         return (gene_name, functional_class)
 
     # array with dictionaries containing the information
-    annotations = [dict(zip(vep_field_names, x.split('|'))) for x in info_field['CSQ'].split(',') if
+    annotations = [dict(list(zip(vep_field_names, x.split('|')))) for x in info_field['CSQ'].split(',') if
                    len(vep_field_names) == len(x.split('|'))]
 
     # loop through and choose the canonical annotation
@@ -457,7 +462,7 @@ def parent_AD_cuts(dad_AD_info, mom_AD_info, args):
 def load_esp_counts(esp_file, chrom):
     "Open the ESP counts file and save variants for a given chromosome"
     esp_counts = {}
-    (count_ea, numchr_ea, af_ea, count_aa, numchr_aa, af_aa) = range(9, 15)
+    (count_ea, numchr_ea, af_ea, count_aa, numchr_aa, af_aa) = list(range(9, 15))
 
     with open(esp_file, 'r') as esp_data:
         for line in esp_data:
@@ -521,7 +526,7 @@ def get_variant_freq(esp_chr_counts, chr_pos_change, variant_annotation):
     vcf_freq = 0.0
 
     # Determine allele frequency if found in ESP
-    if chr_pos_change in esp_chr_counts.keys():
+    if chr_pos_change in list(esp_chr_counts.keys()):
         # sys.stderr.write('Found in ESP: {0}\n'.format(chr_pos_change))
         esp_freq = esp_chr_counts[chr_pos_change]
 
@@ -721,7 +726,7 @@ def process_autosome_variant(line, Fam, PL_pos, AD_pos, DP_pos, args,
                 line[7]
             ]
 
-        print('\t'.join(map(str, res_indiv)))
+        print(('\t'.join(map(str, res_indiv))))
 
 
 def process_multi_variant(line, Fam, PL_pos, AD_pos, DP_pos, args,
@@ -917,7 +922,7 @@ def process_multi_variant(line, Fam, PL_pos, AD_pos, DP_pos, args,
                 line[7]
             ]
 
-        print('\t'.join(map(str, res_indiv)))
+        print(('\t'.join(map(str, res_indiv))))
 
 
 def process_hemizygous_variants(line, Fam, PL_pos, AD_pos, DP_pos, args,
@@ -1072,7 +1077,7 @@ def process_hemizygous_variants(line, Fam, PL_pos, AD_pos, DP_pos, args,
                 dad_DP, mom_DP, dp_ratio, prob_true_dn, qual_flag, line[7]
             ]
 
-        print('\t'.join(map(str, res_indiv)))
+        print(('\t'.join(map(str, res_indiv))))
 
 
 def process_multi_hemi_variant(line, Fam, PL_pos, AD_pos, DP_pos, args,
@@ -1284,7 +1289,7 @@ def process_multi_hemi_variant(line, Fam, PL_pos, AD_pos, DP_pos, args,
                 dad_DP, mom_DP, dp_ratio, prob_true_dn, qual_flag, line[7]
             ]
 
-        print('\t'.join(map(str, res_indiv)))
+        print(('\t'.join(map(str, res_indiv))))
 
 
 def main(vcffile, Fam, args):
@@ -1294,37 +1299,37 @@ def main(vcffile, Fam, args):
     sys.stderr.write('*** WARNGING: Only processing sites up to triallelic (one ref, two alt) ***\n')
 
     # Printing out script and run information
-    print('## Run start date and time: {0}'.format(time.strftime("%c")))  # date and time
-    print('## Script version: {0}'.format(__version__))  # script version used
-    print('## Command given: python {0}'.format(' '.join(sys.argv)))  # full command
+    print(('## Run start date and time: {0}'.format(time.strftime("%c"))))  # date and time
+    print(('## Script version: {0}'.format(__version__)))  # script version used
+    print(('## Command given: python {0}'.format(' '.join(sys.argv))))  # full command
 
     # Printing labels line
     if args.annotatevar | args.annotatevar_VEP:
-        print('\t'.join([
+        print(('\t'.join([
             "Chr", "Pos", "rsID", "Ref", "Alt", "Child_ID", "Dad_ID",
             "Mom_ID", "Child_Sex", "Child_AffectedStatus", "Child_PL_AA",
             "Dad_PL_AB", "Mom_PL_AB", "Child_AD_Ratio", "Dad_AD_Ratio",
             "Mom_AD_Ratio", "DP_Child", "DP_Dad", "DP_Mom", "DP_Ratio",
             "Prob_dn", "Gene_name", "Category", "Validation_Likelihood",
             "Annotation"
-        ]))
+        ])))
     else:
-        print('\t'.join([
+        print(('\t'.join([
             "Chr", "Pos", "rsID", "Ref", "Alt", "Child_ID", "Dad_ID",
             "Mom_ID", "Child_Sex", "Child_AffectedStatus", "Child_PL_AA",
             "Dad_PL_AB", "Mom_PL_AB", "Child_AD_Ratio", "Dad_AD_Ratio",
             "Mom_AD_Ratio", "DP_Child", "DP_Dad", "DP_Mom", "DP_Ratio",
             "Prob_dn", "Validation_Likelihood", "Annotation"
-        ]))
+        ])))
 
     # Reading header lines to get VEP and individual arrays
     vep_field_names = '.'  # holder, should be replaced if VEP annotation is present
 
-    header_line = vcffile.next()
+    header_line = next(vcffile)
     while header_line.startswith('##'):
         if header_line.find('ID=CSQ') > -1:
             vep_field_names = header_line.split('Format: ')[-1].strip('">').split('|')
-        header_line = vcffile.next()
+        header_line = next(vcffile)
 
     if not header_line.startswith('#CHROM'):  # should be the #CHROM line
         sys.stderr.write('ERROR: Unexpected header line: Expected line starting with "#CHROM"'

@@ -1,3 +1,5 @@
+from __future__ import absolute_import
+from __future__ import print_function
 from hail.utils.java import *
 
 class Summary(object):
@@ -63,15 +65,15 @@ class Summary(object):
     def report(self):
         """Print the summary information."""
         print('')  # clear out pesky progress bar if necessary
-        print('%16s: %d' % ('Samples', self.samples))
-        print('%16s: %d' % ('Variants', self.variants))
-        print('%16s: %f' % ('Call Rate', self.call_rate))
-        print('%16s: %s' % ('Contigs', self.contigs))
-        print('%16s: %d' % ('Multiallelics', self.multiallelics))
-        print('%16s: %d' % ('SNPs', self.snps))
-        print('%16s: %d' % ('MNPs', self.mnps))
-        print('%16s: %d' % ('Insertions', self.insertions))
-        print('%16s: %d' % ('Deletions', self.deletions))
-        print('%16s: %d' % ('Complex Alleles', self.complex))
-        print('%16s: %d' % ('Star Alleles', self.star))
-        print('%16s: %d' % ('Max Alleles', self.max_alleles))
+        print(('%16s: %d' % ('Samples', self.samples)))
+        print(('%16s: %d' % ('Variants', self.variants)))
+        print(('%16s: %f' % ('Call Rate', self.call_rate)))
+        print(('%16s: %s' % ('Contigs', self.contigs)))
+        print(('%16s: %d' % ('Multiallelics', self.multiallelics)))
+        print(('%16s: %d' % ('SNPs', self.snps)))
+        print(('%16s: %d' % ('MNPs', self.mnps)))
+        print(('%16s: %d' % ('Insertions', self.insertions)))
+        print(('%16s: %d' % ('Deletions', self.deletions)))
+        print(('%16s: %d' % ('Complex Alleles', self.complex)))
+        print(('%16s: %d' % ('Star Alleles', self.star)))
+        print(('%16s: %d' % ('Max Alleles', self.max_alleles)))

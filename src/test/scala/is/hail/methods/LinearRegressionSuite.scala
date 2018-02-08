@@ -3,9 +3,10 @@ package is.hail.methods
 import is.hail.SparkSuite
 import is.hail.TestUtils._
 import is.hail.annotations.Annotation
-import is.hail.expr.{TFloat64, TString}
+import is.hail.expr.types._
 import is.hail.table.Table
 import is.hail.utils._
+import is.hail.testUtils._
 import is.hail.variant.Variant
 import org.testng.annotations.Test
 
@@ -259,7 +260,7 @@ class LinearRegressionSuite extends SparkSuite {
     val vds = hc.importVCF("src/test/resources/regressionLinear.vcf")
       .annotateSamplesTable(covariates, root = "sa.cov")
       .annotateSamplesTable(Table.importFam(hc, "src/test/resources/regressionLinear.fam"), root = "sa.fam")
-      .linreg(Array("sa.fam.isCase"), "g.GT.nNonRefAlleles()", Array("sa.cov.Cov1", "sa.cov.Cov2"))
+      .linreg(Array("sa.fam.is_case"), "g.GT.nNonRefAlleles()", Array("sa.cov.Cov1", "sa.cov.Cov2"))
 
     val qBeta = vds.queryVA("va.linreg.beta")._2
     val qSe = vds.queryVA("va.linreg.se")._2
@@ -308,8 +309,8 @@ class LinearRegressionSuite extends SparkSuite {
 
     val vds = hc.importVCF("src/test/resources/regressionLinear.vcf")
       .annotateSamplesTable(covariates, root = "sa.cov")
-      .annotateSamplesTable(Table.importFam(hc, "src/test/resources/regressionLinear.fam", isQuantitative = true, missingValue = "0"), root = "sa.fam")
-      .linreg(Array("sa.fam.qPheno"), "g.GT.nNonRefAlleles()", Array("sa.cov.Cov1", "sa.cov.Cov2"))
+      .annotateSamplesTable(Table.importFam(hc, "src/test/resources/regressionLinear.fam", isQuantPheno = true, missingValue = "0"), root = "sa.fam")
+      .linreg(Array("sa.fam.quant_pheno"), "g.GT.nNonRefAlleles()", Array("sa.cov.Cov1", "sa.cov.Cov2"))
 
     val qBeta = vds.queryVA("va.linreg.beta")._2
     val qSe = vds.queryVA("va.linreg.se")._2

@@ -4,7 +4,8 @@ import java.io.InputStream
 
 import is.hail.HailContext
 import is.hail.check.Gen
-import is.hail.expr.{JSONExtractGenomeReference, TInterval, TLocus, TVariant}
+import is.hail.expr.types._
+import is.hail.expr.{JSONAnnotationImpex, JSONExtractGenomeReference, Parser}
 import is.hail.utils._
 import org.json4s._
 import org.json4s.jackson.{JsonMethods, Serialization}
@@ -12,19 +13,41 @@ import org.json4s.jackson.{JsonMethods, Serialization}
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.language.implicitConversions
+import is.hail.expr.Parser._
+import org.apache.hadoop.conf.Configuration
 
 abstract class GRBase extends Serializable {
-  val variant: TVariant = TVariant(this)
-  val locus: TLocus = TLocus(this)
-  val interval: TInterval = TInterval(this)
+  val variantType: TVariant
+  val locusType: TLocus
+  val intervalType: TInterval
+
+  def name: String
 
   def variantOrdering: Ordering[Variant]
 
   def locusOrdering: Ordering[Locus]
 
-  def intervalOrdering: Ordering[Interval[Locus]]
+  def contigParser: Parser[String]
 
   def isValidContig(contig: String): Boolean
+
+  def checkVariant(v: Variant): Unit
+
+  def checkVariant(contig: String, pos: Int, ref: String, alts: Array[String]): Unit
+
+  def checkVariant(contig: String, start: Int, ref: String, alts: java.util.ArrayList[String]): Unit
+
+  def checkVariant(contig: String, pos: Int, ref: String, alt: String): Unit
+
+  def checkLocus(l: Locus): Unit
+
+  def checkLocus(contig: String, pos: Int): Unit
+
+  def checkInterval(i: Interval): Unit
+
+  def checkInterval(l1: Locus, l2: Locus): Unit
+
+  def checkInterval(contig: String, start: Int, end: Int): Unit
 
   def contigLength(contig: String): Int
 
@@ -79,10 +102,10 @@ case class GenomeReference(name: String, contigs: Array[String], lengths: Map[St
   val extraLengths = lengths.keySet.diff(contigs.toSet)
 
   if (missingLengths.nonEmpty)
-    fatal(s"No lengths given for the following contigs: ${ missingLengths.mkString(", ")}")
+    fatal(s"No lengths given for the following contigs: ${ missingLengths.mkString(", ") }")
 
   if (extraLengths.nonEmpty)
-    fatal(s"Contigs found in `lengths' that are not present in `contigs': ${ extraLengths.mkString(", ")}")
+    fatal(s"Contigs found in `lengths' that are not present in `contigs': ${ extraLengths.mkString(", ") }")
 
   if (xContigs.intersect(yContigs).nonEmpty)
     fatal(s"Found the contigs `${ xContigs.intersect(yContigs).mkString(", ") }' in both X and Y contigs.")
@@ -127,9 +150,10 @@ case class GenomeReference(name: String, contigs: Array[String], lengths: Map[St
     def compare(x: Locus, y: Locus): Int = GenomeReference.compare(contigsIndex, x, y)
   }
 
-  val intervalOrdering = new Ordering[Interval[Locus]] {
-    def compare(x: Interval[Locus], y: Interval[Locus]): Int = GenomeReference.compare(contigsIndex, x, y)
-  }
+  // must be constructed after orderings
+  val variantType: TVariant = TVariant(this)
+  val locusType: TLocus = TLocus(this)
+  val intervalType: TInterval = TInterval(locusType)
 
   val par = parInput.map { case (start, end) =>
     if (start.contig != end.contig)
@@ -139,9 +163,10 @@ case class GenomeReference(name: String, contigs: Array[String], lengths: Map[St
       (!xContigs.contains(end.contig) && !yContigs.contains(end.contig)))
       fatal(s"The contig name for PAR interval `$start-$end' was not found in xContigs `${ xContigs.mkString(",") }' or in yContigs `${ yContigs.mkString(",") }'.")
 
-    implicit val locusOrd = locusOrdering
     Interval(start, end)
   }
+
+  def contigParser = Parser.oneOfLiteral(contigs)
 
   def contigLength(contig: String): Int = lengths.get(contig) match {
     case Some(l) => l
@@ -155,6 +180,67 @@ case class GenomeReference(name: String, contigs: Array[String], lengths: Map[St
 
   def isValidContig(contig: String): Boolean = contigsSet.contains(contig)
 
+  private def isValidPosition(contig: String, pos: Int): Boolean = pos > 0 && pos <= contigLength(contig)
+
+  def checkLocus(l: Locus): Unit = checkLocus(l.contig, l.position)
+
+  def checkLocus(contig: String, pos: Int): Unit = {
+    if (!isValidContig(contig))
+      fatal(s"Invalid locus `$contig:$pos' found. Contig `$contig' is not in the reference genome `$name'.")
+    if (!isValidPosition(contig, pos))
+      fatal(s"Invalid locus `$contig:$pos' found. Position `$pos' is not within the range [1-${ contigLength(contig) }] for reference genome `$name'.")
+  }
+
+  def checkVariant(v: Variant): Unit = {
+    if (!isValidContig(v.contig))
+      fatal(s"Invalid variant `$v' found. Contig `${ v.contig }' is not in the reference genome `$name'.")
+    if (!isValidPosition(v.contig, v.start))
+      fatal(s"Invalid variant `$v' found. Start `${ v.start }' is not within the range [1-${ contigLength(v.contig) }] for reference genome `$name'.")
+  }
+
+  def checkVariant(contig: String, start: Int, ref: String, alt: String): Unit = {
+    val v = s"$contig:$start:$ref:$alt"
+    if (!isValidContig(contig))
+      fatal(s"Invalid variant `$v' found. Contig `$contig' is not in the reference genome `$name'.")
+    if (!isValidPosition(contig, start))
+      fatal(s"Invalid variant `$v' found. Start `$start' is not within the range [1-${ contigLength(contig) }] for reference genome `$name'.")
+  }
+
+  def checkVariant(contig: String, start: Int, ref: String, alts: Array[String]): Unit = checkVariant(contig, start, ref, alts.mkString(","))
+
+  def checkVariant(contig: String, start: Int, ref: String, alts: java.util.ArrayList[String]): Unit = checkVariant(contig, start, ref, alts.asScala.toArray)
+
+  def checkInterval(i: Interval): Unit = {
+    val start = i.start.asInstanceOf[Locus]
+    val end = i.end.asInstanceOf[Locus]
+    if (!isValidContig(start.contig))
+      fatal(s"Invalid interval `$i' found. Contig `${ start.contig }' is not in the reference genome `$name'.")
+    if (!isValidContig(end.contig))
+      fatal(s"Invalid interval `$i' found. Contig `${ end.contig }' is not in the reference genome `$name'.")
+    if (!isValidPosition(start.contig, start.position))
+      fatal(s"Invalid interval `$i' found. Start `$start' is not within the range [1-${ contigLength(start.contig) }] for reference genome `$name'.")
+    if (!isValidPosition(end.contig, end.position))
+      fatal(s"Invalid interval `$i' found. End `$end' is not within the range [1-${ contigLength(end.contig) }] for reference genome `$name'.")
+  }
+
+  def checkInterval(l1: Locus, l2: Locus): Unit = {
+    val i = s"$l1-$l2"
+    if (!isValidPosition(l1.contig, l1.position))
+      fatal(s"Invalid interval `$i' found. Locus `$l1' is not in the reference genome `$name'.")
+    if (!isValidPosition(l2.contig, l2.position))
+      fatal(s"Invalid interval `$i' found. Locus `$l2' is not in the reference genome `$name'.")
+  }
+
+  def checkInterval(contig: String, start: Int, end: Int): Unit = {
+    val i = s"$contig:$start-$end"
+    if (!isValidContig(contig))
+      fatal(s"Invalid interval `$i' found. Contig `$contig' is not in the reference genome `$name'.")
+    if (!isValidPosition(contig, start))
+      fatal(s"Invalid interval `$i' found. Start `$start' is not within the range [1-${ contigLength(contig) }] for reference genome `$name'.")
+    if (!isValidPosition(contig, end))
+      fatal(s"Invalid interval `$i' found. End `$end' is not within the range [1-${ contigLength(contig) }] for reference genome `$name'.")
+  }
+
   def inX(contigIdx: Int): Boolean = xContigIndices.contains(contigIdx)
 
   def inX(contig: String): Boolean = xContigs.contains(contig)
@@ -167,9 +253,9 @@ case class GenomeReference(name: String, contigs: Array[String], lengths: Map[St
 
   def isMitochondrial(contig: String): Boolean = mtContigs.contains(contig)
 
-  def inXPar(locus: Locus): Boolean = inX(locus.contig) && par.exists(_.contains(locus))
+  def inXPar(l: Locus): Boolean = inX(l.contig) && par.exists(_.contains(locusType.ordering, l))
 
-  def inYPar(locus: Locus): Boolean = inY(locus.contig) && par.exists(_.contains(locus))
+  def inYPar(l: Locus): Boolean = inY(l.contig) && par.exists(_.contains(locusType.ordering, l))
 
   def compare(contig1: String, contig2: String): Int = GenomeReference.compare(contigsIndex, contig1, contig2)
 
@@ -177,15 +263,13 @@ case class GenomeReference(name: String, contigs: Array[String], lengths: Map[St
 
   def compare(l1: Locus, l2: Locus): Int = GenomeReference.compare(contigsIndex, l1, l2)
 
-  def compare(i1: Interval[Locus], i2: Interval[Locus]): Int = GenomeReference.compare(contigsIndex, i1, i2)
-
   def toJSON: JValue = JObject(
     ("name", JString(name)),
     ("contigs", JArray(contigs.map(c => JObject(("name", JString(c)), ("length", JInt(lengths(c))))).toList)),
     ("xContigs", JArray(xContigs.map(JString(_)).toList)),
     ("yContigs", JArray(yContigs.map(JString(_)).toList)),
     ("mtContigs", JArray(mtContigs.map(JString(_)).toList)),
-    ("par", JArray(par.map(_.toJSON(_.toJSON)).toList))
+    ("par", JArray(par.map(i => JSONAnnotationImpex.exportAnnotation(i, intervalType)).toList))
   )
 
   def validateContigRemap(contigMapping: Map[String, String]) {
@@ -256,12 +340,14 @@ object GenomeReference {
 
   def removeReference(name: String): Unit = {
     val nonBuiltInReferences = references.keySet -- hailReferences
+
     if (hailReferences.contains(name))
       fatal(s"Cannot remove reference genome. `$name' is a built-in Hail reference. Choose a reference name from the following list:\n  " +
         s"@1", nonBuiltInReferences.truncatable("\n  "))
     if (!hasReference(name))
       fatal(s"Cannot remove reference genome. `$name' does not exist. Choose a reference name from the following list:\n  " +
         s"@1", nonBuiltInReferences.truncatable("\n  "))
+
     references -= name
   }
 
@@ -293,6 +379,42 @@ object GenomeReference {
     addReference(gr)
     gr
   }
+
+  def importReferences(hConf: Configuration, path: String) {
+    if (hConf.exists(path)) {
+      val refs = hConf.listStatus(path)
+      refs.foreach { fs =>
+        val grPath = fs.getPath.toString
+        val gr = hConf.readFile(grPath) { (is: InputStream) => fromJSON(JsonMethods.parse(is)) }
+        val name = gr.name
+        if (!GenomeReference.hasReference(name))
+          addReference(gr)
+        else {
+          if (GenomeReference.getReference(name) != gr)
+            fatal(s"`$name' already exists and is not identical to the imported reference from `$grPath'.")
+        }
+      }
+    }
+  }
+
+  private def writeReference(hc: HailContext, path: String, gr: GRBase) {
+    val grPath = path + gr.name + ".json.gz"
+    if (!hailReferences.contains(gr.name) && !hc.hadoopConf.exists(grPath))
+      gr.asInstanceOf[GenomeReference].write(hc, grPath)
+  }
+
+  def exportReferences(hc: HailContext, path: String, t: Type) { (t: @unchecked) match {
+      case TArray(elementType, _) => exportReferences(hc, path, elementType)
+      case TSet(elementType, req) => exportReferences(hc, path, elementType)
+      case TDict(keyType, valueType, _) =>
+        exportReferences(hc, path, keyType)
+        exportReferences(hc, path, valueType)
+      case TStruct(fields, _) => fields.foreach(fd => exportReferences(hc, path, fd.typ))
+      case TVariant(gr, _) => writeReference(hc, path, gr)
+      case TLocus(gr, _) => writeReference(hc, path, gr)
+      case TInterval(TLocus(gr, _), _) => writeReference(hc, path, gr)
+      case _ =>
+  }}
 
   def compare(contigsIndex: Map[String, Int], c1: String, c2: String): Int = {
     (contigsIndex.get(c1), contigsIndex.get(c2)) match {
@@ -327,36 +449,25 @@ object GenomeReference {
     Integer.compare(l1.position, l2.position)
   }
 
-  def compare(contigsIndex: Map[String, Int], i1: Interval[Locus], i2: Interval[Locus]): Int = {
-    val c = compare(contigsIndex, i1.start, i2.start)
-    if (c != 0)
-      return c
-
-    compare(contigsIndex, i1.end, i2.end)
-  }
-
   def gen: Gen[GenomeReference] = for {
-    name <- Gen.identifier
-    nContigs <- Gen.choose(3, 50)
+    name <- Gen.identifier.filter(!GenomeReference.hasReference(_))
+    nContigs <- Gen.choose(3, 10)
     contigs <- Gen.distinctBuildableOfN[Array](nContigs, Gen.identifier)
-    lengths <- Gen.distinctBuildableOfN[Array](nContigs, Gen.choose(1000000, 500000000))
+    lengths <- Gen.buildableOfN[Array](nContigs, Gen.choose(1000000, 500000000))
     contigsIndex = contigs.zip(lengths).toMap
     xContig <- Gen.oneOfSeq(contigs)
-    yContig <- Gen.oneOfSeq((contigs.toSet - xContig).toSeq)
-    mtContig <- Gen.oneOfSeq((contigs.toSet - xContig - yContig).toSeq)
-    locusOrd = new Ordering[Locus] {
-      def compare(x: Locus, y: Locus): Int = {
-        val c = Integer.compare(contigsIndex(x.contig), contigsIndex(y.contig))
-        if (c != 0)
-          return c
-
-        Integer.compare(x.position, y.position)
-      }
-    }
-    parX <- Gen.distinctBuildableOfN[Array](2, Interval.gen(Locus.gen(xContig, contigsIndex(xContig)))(locusOrd))
-    parY <- Gen.distinctBuildableOfN[Array](2, Interval.gen(Locus.gen(yContig, contigsIndex(yContig)))(locusOrd))
+    parXA <- Gen.choose(0, contigsIndex(xContig))
+    parXB <- Gen.choose(0, contigsIndex(xContig))
+    yContig <- Gen.oneOfSeq(contigs) if yContig != xContig
+    parYA <- Gen.choose(0, contigsIndex(yContig))
+    parYB <- Gen.choose(0, contigsIndex(yContig))
+    mtContig <- Gen.oneOfSeq(contigs) if mtContig != xContig && mtContig != yContig
   } yield GenomeReference(name, contigs, contigs.zip(lengths).toMap, Set(xContig), Set(yContig), Set(mtContig),
-    (parX ++ parY).map(i => (i.start, i.end)))
+    Array(
+      (Locus(xContig, math.min(parXA, parXB)),
+        Locus(xContig, math.max(parXA, parXB))),
+      (Locus(yContig, math.min(parYA, parYB)),
+        Locus(yContig, math.max(parYA, parYB)))))
 
   def apply(name: java.lang.String, contigs: java.util.ArrayList[String], lengths: java.util.HashMap[String, Int],
     xContigs: java.util.ArrayList[String], yContigs: java.util.ArrayList[String],
@@ -364,8 +475,8 @@ object GenomeReference {
     val parRegex = """(\w+):(\d+)-(\d+)""".r
 
     val par = parInput.asScala.toArray.map {
-        case parRegex(contig, start, end) => (Locus(contig.toString, start.toInt), Locus(contig.toString, end.toInt))
-        case _ => fatal("expected PAR input of form contig:start-end")
+      case parRegex(contig, start, end) => (Locus(contig.toString, start.toInt), Locus(contig.toString, end.toInt))
+      case _ => fatal("expected PAR input of form contig:start-end")
     }
 
     val gr = GenomeReference(name, contigs.asScala.toArray, lengths.asScala.toMap, xContigs.asScala.toSet,
@@ -376,6 +487,9 @@ object GenomeReference {
 }
 
 case class GRVariable(var gr: GRBase = null) extends GRBase {
+  val variantType: TVariant = TVariant(this)
+  val locusType: TLocus = TLocus(this)
+  val intervalType: TInterval = TInterval(locusType)
 
   override def toString = "?GR"
 
@@ -398,14 +512,40 @@ case class GRVariable(var gr: GRBase = null) extends GRBase {
     gr
   }
 
-  def variantOrdering: Ordering[Variant] = ???
+  def name: String = ???
 
-  def locusOrdering: Ordering[Locus] = ???
+  def variantOrdering: Ordering[Variant] =
+    new Ordering[Variant] {
+      def compare(x: Variant, y: Variant): Int = throw new UnsupportedOperationException("GRVariable.variantOrdering unimplemented")
+    }
 
-  def intervalOrdering: Ordering[Interval[Locus]] = ???
+  def locusOrdering: Ordering[Locus] =
+    new Ordering[Locus] {
+      def compare(x: Locus, y: Locus): Int = throw new UnsupportedOperationException("GRVariable.locusOrdering unimplemented")
+    }
+
+  def contigParser: Parser[String] = ???
 
   def isValidContig(contig: String): Boolean = ???
 
+  def checkVariant(v: Variant): Unit = ???
+
+  def checkVariant(contig: String, pos: Int, ref: String, alts: Array[String]): Unit = ???
+
+  def checkVariant(contig: String, pos: Int, ref: String, alt: String): Unit = ???
+
+  def checkVariant(contig: String, start: Int, ref: String, alts: java.util.ArrayList[String]): Unit = ???
+
+  def checkLocus(l: Locus): Unit = ???
+
+  def checkLocus(contig: String, pos: Int): Unit = ???
+
+  def checkInterval(i: Interval): Unit = ???
+
+  def checkInterval(l1: Locus, l2: Locus): Unit = ???
+
+  def checkInterval(contig: String, start: Int, end: Int): Unit = ???
+  
   def contigLength(contig: String): Int = ???
 
   def contigLength(contigIdx: Int): Int = ???

@@ -3,7 +3,7 @@ package is.hail.methods
 import is.hail.SparkSuite
 import is.hail.check.Prop._
 import is.hail.check.{Gen, Properties}
-import is.hail.expr.Type
+import is.hail.expr.types.Type
 import is.hail.io.vcf.ExportVCF
 import is.hail.utils._
 import is.hail.testUtils._
@@ -93,7 +93,7 @@ class ImputeSexSuite extends SparkSuite {
         }
 
         val countAnnotated = mappedVDS.annotateVariantsExpr(
-          "va.maf = let a = gs.map(g => g.GT.oneHotAlleles(v)).sum() in a[1] / a.sum()")
+          "va.maf = let a = gs.map(g => g.GT.oneHotAlleles(v)).sum() in a[1].toFloat64() / a.sum()")
         val sexcheck2 = ImputeSexPlink(countAnnotated, popFrequencyExpr = Some("va.maf"), includePar = true)
 
         result &&

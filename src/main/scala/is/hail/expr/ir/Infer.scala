@@ -1,6 +1,6 @@
 package is.hail.expr.ir
 
-import is.hail.expr.{TAggregable, TArray, TBoolean, TInt32, TStruct, Type}
+import is.hail.expr.types._
 
 object Infer {
   def apply(ir: IR, tAgg: Option[TAggregable] = None) { apply(ir, tAgg, new Env[Type]()) }
@@ -67,7 +67,7 @@ object Infer {
         infer(a)
         infer(i)
         assert(i.typ.isOfType(TInt32()))
-        x.typ = a.typ.asInstanceOf[TArray].elementType
+        x.typ = coerce[TArray](a.typ).elementType
       case ArrayMissingnessRef(a, i) =>
         infer(a)
         infer(i)
@@ -77,12 +77,12 @@ object Infer {
         assert(a.typ.isInstanceOf[TArray])
       case x@ArrayMap(a, name, body, _) =>
         infer(a)
-        val tarray = a.typ.asInstanceOf[TArray]
+        val tarray = coerce[TArray](a.typ)
         infer(body, env = env.bind(name, tarray.elementType))
         x.elementTyp = body.typ
       case x@ArrayFold(a, zero, accumName, valueName, body, _) =>
         infer(a)
-        val tarray = a.typ.asInstanceOf[TArray]
+        val tarray = coerce[TArray](a.typ)
         infer(zero)
         infer(body, env = env.bind(accumName -> zero.typ, valueName -> tarray.elementType))
         assert(body.typ == zero.typ)
@@ -95,42 +95,55 @@ object Infer {
         }
       case x@AggMap(a, name, body, _) =>
         infer(a)
-        val tagg = a.typ.asInstanceOf[TAggregable]
+        val tagg = coerce[TAggregable](a.typ)
         infer(body, env = aggScope(tagg).bind(name, tagg.elementType))
         val tagg2 = tagg.copy(elementType = body.typ)
         tagg2.symTab = tagg.symTab
         x.typ = tagg2
       case x@AggFilter(a, name, body, typ) =>
         infer(a)
-        val tagg = a.typ.asInstanceOf[TAggregable]
+        val tagg = coerce[TAggregable](a.typ)
         infer(body, env = aggScope(tagg).bind(name, tagg.elementType))
         assert(body.typ.isInstanceOf[TBoolean])
         x.typ = tagg
       case x@AggFlatMap(a, name, body, typ) =>
         infer(a)
-        val tagg = a.typ.asInstanceOf[TAggregable]
+        val tagg = coerce[TAggregable](a.typ)
         infer(body, env = aggScope(tagg).bind(name, tagg.elementType))
-        val tout = body.typ.asInstanceOf[TArray]
+        val tout = coerce[TArray](body.typ)
         val tagg2 = tagg.copy(elementType = tout.elementType)
         tagg2.symTab = tagg.symTab
         x.typ = tagg2
       case x@AggSum(a, _) =>
         infer(a)
-        val tAgg = a.typ.asInstanceOf[TAggregable]
+        val tAgg = coerce[TAggregable](a.typ)
         x.typ = tAgg.elementType
       case x@MakeStruct(fields, _) =>
         fields.foreach { case (name, a) => infer(a) }
         x.typ = TStruct(fields.map { case (name, a) =>
           (name, a.typ)
         }: _*)
+      case x@InsertFields(old, fields, _) =>
+        infer(old)
+        fields.foreach { case (name, a) => infer(a) }
+        x.typ = fields.foldLeft(old.typ){ case (t, (name, a)) =>
+          t match {
+            case t2: TStruct =>
+              t2.selfField(name) match {
+                case Some(f2) => t2.updateKey(name, f2.index, a.typ)
+                case None => t2.appendKey(name, a.typ)
+              }
+            case _ => TStruct(name -> a.typ)
+          }
+        }.asInstanceOf[TStruct]
       case x@GetField(o, name, _) =>
         infer(o)
-        val t = o.typ.asInstanceOf[TStruct]
+        val t = coerce[TStruct](o.typ)
         assert(t.index(name).nonEmpty)
         x.typ = t.field(name).typ
       case GetFieldMissingness(o, name) =>
         infer(o)
-        val t = o.typ.asInstanceOf[TStruct]
+        val t = coerce[TStruct](o.typ)
         assert(t.index(name).nonEmpty)
       case In(i, typ) =>
         assert(typ != null)

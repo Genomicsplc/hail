@@ -1,13 +1,14 @@
 package is.hail.methods
 
 import is.hail.HailContext
-import is.hail.expr.{EvalContext, Parser, TFloat64, TInt64, TString, TStruct, TVariant}
+import is.hail.expr.{EvalContext, Parser}
 import is.hail.table.Table
 import is.hail.annotations.{Annotation, Region, RegionValue, RegionValueBuilder, UnsafeRow}
-import is.hail.expr._
-import is.hail.variant.{GenomeReference, Genotype, HardCallView, Variant, MatrixTable}
+import is.hail.expr.types._
+import is.hail.variant.{GenomeReference, Genotype, HardCallView, MatrixTable, Variant}
 import is.hail.methods.IBD.generateComputeMaf
 import is.hail.rvd.RVD
+import is.hail.stats.RegressionUtils
 import org.apache.spark.rdd.RDD
 import is.hail.utils._
 import org.apache.spark.sql.Row
@@ -212,7 +213,7 @@ object IBD {
 
     val nSamples = vds.nSamples
 
-    val rowType = vds.rowType
+    val rowType = vds.rvRowType
     val unnormalizedIbse = vds.rdd2.mapPartitions { it =>
       val view = HardCallView(rowType)
       it.map { rv =>
@@ -346,8 +347,8 @@ object IBD {
 
     val mafSymbolTable = Map("v" -> (0, vds.vSignature), "va" -> (1, vds.vaSignature))
     val mafEc = EvalContext(mafSymbolTable)
-    val computeMafThunk = Parser.parseTypedExpr[java.lang.Double](computeMafExpr, mafEc)
-    val rowType = vds.rowType
+    val computeMafThunk = RegressionUtils.parseExprAsDouble(computeMafExpr, mafEc)
+    val rowType = vds.rvRowType
 
     { (rv: RegionValue) =>
       val v = Variant.fromRegionValue(rv.region, rowType.loadField(rv, 1))

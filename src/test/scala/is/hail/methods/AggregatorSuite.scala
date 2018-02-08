@@ -2,10 +2,11 @@ package is.hail.methods
 
 import is.hail.check.{Gen, Prop}
 import is.hail.expr._
+import is.hail.expr.types._
 import is.hail.table.Table
 import is.hail.utils._
 import is.hail.testUtils._
-import is.hail.variant.{VSMSubgen, Variant, MatrixTable}
+import is.hail.variant.{MatrixTable, VSMSubgen, Variant}
 import is.hail.{SparkSuite, TestUtils}
 import org.apache.commons.math3.random.RandomDataGenerator
 import org.apache.spark.sql.Row
@@ -236,7 +237,7 @@ va.hist.nGreater == va.nGreater
           |va.AC = gs.map(g => g.GT.oneHotAlleles(v)).sum(),
           |va.GC = gs.map(g => g.GT.oneHotGenotype(v)).sum(),
           |va.AN = gs.filter(g => isDefined(g.GT)).count() * 2""".stripMargin)
-      .annotateVariantsExpr("va.AF = va.AC / va.AN")
+      .annotateVariantsExpr("va.AF = va.AC / va.AN.toFloat64()")
     val (_, csAC) = vds.queryVA("va.callStats.AC")
     val (_, csAF) = vds.queryVA("va.callStats.AF")
     val (_, csAN) = vds.queryVA("va.callStats.AN")
@@ -296,11 +297,9 @@ va.hist.nGreater == va.nGreater
         assert(vds.querySamples("samples.flatMap(g => [1,2]).filter(x => x % 2 == 0).sum()")._1 == 2 * vds.nSamples)
         assert(vds.querySamples("samples.flatMap(g => [1,2,2].toSet()).filter(x => x % 2 == 0).sum()")._1 == 2 * vds.nSamples)
 
-        vds.annotateVariantsExpr(s"""va = gs.filter(g => s == "$s1").map(g => 1).sum()""")
-          .rdd
-          .collect()
-          .foreach { case (_, (va, _)) => assert(va == 1) }
-        true
+        vds.annotateVariantsExpr(s"""va.foo = gs.filter(g => s == "$s1").map(g => 1).sum()""")
+            .variantsKT()
+            .forall("va.foo == 1")
       })
 
     p.check()
@@ -492,7 +491,7 @@ va.hist.nGreater == va.nGreater
   }
 
   @Test def testCollectAsSet() {
-    val kt = Table.range(hc, 100, Some(10))
+    val kt = Table.range(hc, 100, partitions = Some(10))
 
     assert(kt.query(Array("index.collectAsSet()"))(0)._1 == (0 until 100).toSet)
     assert(kt.union(kt, kt).query(Array("index.collectAsSet()"))(0)._1 == (0 until 100).toSet)

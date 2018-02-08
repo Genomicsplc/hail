@@ -1,9 +1,8 @@
 package is.hail.expr.ir
 
-import is.hail.annotations.{Region, StagedRegionValueBuilder}
+import is.hail.annotations._
 import is.hail.asm4s._
-import is.hail.expr
-import is.hail.expr.{TArray, TBoolean, TContainer, TFloat32, TFloat64, TInt32, TInt64, TStruct}
+import is.hail.expr.types._
 import is.hail.utils._
 import org.objectweb.asm.tree._
 
@@ -35,7 +34,6 @@ object Emit {
 
   private def present(x: Code[_]): (Code[Unit], Code[Boolean], Code[_]) =
     (Code._empty, const(false), x)
-  private def tcoerce[T <: expr.Type](x: expr.Type): T = x.asInstanceOf[T]
 
   // the return value is interpreted as: (precompute, missingness, value)
   // rules:
@@ -77,9 +75,9 @@ object Emit {
         val vti = typeToTypeInfo(value.typ)
         val bti = typeToTypeInfo(typ)
         val mx = mb.newBit()
-        val x = fb.newLocal(name)(vti).asInstanceOf[LocalRef[Any]]
+        val x = coerce[Any](fb.newLocal(name)(vti))
         val mout = mb.newBit()
-        val out = fb.newLocal(name)(bti).asInstanceOf[LocalRef[Any]]
+        val out = coerce[Any](fb.newLocal(name)(bti))
         val (dovalue, mvalue, vvalue) = emit(value)
         val bodyenv = env.bind(name -> (vti, mx, x))
         val (dobody, mbody, vbody) = emit(body, env = bodyenv)
@@ -92,10 +90,10 @@ object Emit {
 
         (setup, mout, out)
 
-      case expr.ir.If(cond, cnsq, altr, typ) =>
+      case If(cond, cnsq, altr, typ) =>
         val (docond, mcond, vcond) = emit(cond)
         val xvcond = mb.newBit()
-        val out = fb.newLocal()(typeToTypeInfo(typ)).asInstanceOf[LocalRef[Any]]
+        val out = coerce[Any](fb.newLocal()(typeToTypeInfo(typ)))
         val mout = mb.newBit()
         val (docnsq, mcnsq, vcnsq) = emit(cnsq)
         val (doaltr, maltr, valtr) = emit(altr)
@@ -111,10 +109,10 @@ object Emit {
 
         (setup, mout, out)
 
-      case expr.ir.Let(name, value, body, typ) =>
+      case Let(name, value, body, typ) =>
         val vti = typeToTypeInfo(value.typ)
         val mx = mb.newBit()
-        val x = fb.newLocal(name)(vti).asInstanceOf[LocalRef[Any]]
+        val x = coerce[Any](fb.newLocal(name)(vti))
         val (dovalue, mvalue, vvalue) = emit(value)
         val bodyenv = env.bind(name -> (vti, mx, x))
         val (dobody, mbody, vbody) = emit(body, env = bodyenv)
@@ -161,7 +159,7 @@ object Emit {
       case ArrayRef(a, i, typ) =>
         val ti = typeToTypeInfo(typ)
         val tarray = TArray(typ)
-        val ati = typeToTypeInfo(tarray).asInstanceOf[TypeInfo[Long]]
+        val ati = coerce[Long](typeToTypeInfo(tarray))
         val (doa, ma, va) = emit(a)
         val (doi, mi, vi) = emit(i)
         val xma = mb.newBit()
@@ -180,8 +178,8 @@ object Emit {
 
         (setup, xmv, region.loadIRIntermediate(typ)(tarray.loadElement(region, xa, xi)))
       case ArrayMissingnessRef(a, i) =>
-        val tarray = tcoerce[TArray](a.typ)
-        val ati = typeToTypeInfo(tarray).asInstanceOf[TypeInfo[Long]]
+        val tarray = coerce[TArray](a.typ)
+        val ati = coerce[Long](typeToTypeInfo(tarray))
         val (doa, ma, va) = emit(a)
         val (doi, mi, vi) = emit(i)
         present(Code(
@@ -192,11 +190,11 @@ object Emit {
         val (doa, ma, va) = emit(a)
         (doa, ma, TContainer.loadLength(region, coerce[Long](va)))
       case x@ArrayMap(a, name, body, elementTyp) =>
-        val tin = a.typ.asInstanceOf[TArray]
+        val tin = coerce[TArray](a.typ)
         val tout = x.typ
         val srvb = new StagedRegionValueBuilder(fb, tout)
         val addElement = srvb.addIRIntermediate(tout.elementType)
-        val etiin = typeToTypeInfo(tin.elementType).asInstanceOf[TypeInfo[Any]]
+        val etiin = coerce[Any](typeToTypeInfo(tin.elementType))
         val xa = fb.newLocal[Long]("am_a")
         val xmv = mb.newBit()
         val xvv = fb.newLocal(name)(etiin)
@@ -228,15 +226,15 @@ object Emit {
             i := i + 1),
           srvb.offset))
       case ArrayFold(a, zero, name1, name2, body, typ) =>
-        val tarray = a.typ.asInstanceOf[TArray]
+        val tarray = coerce[TArray](a.typ)
         val tti = typeToTypeInfo(typ)
         val eti = typeToTypeInfo(tarray.elementType)
         val xma = mb.newBit()
         val xa = fb.newLocal[Long]("af_array")
         val xmv = mb.newBit()
-        val xvv = fb.newLocal(name2)(eti).asInstanceOf[LocalRef[Any]]
+        val xvv = coerce[Any](fb.newLocal(name2)(eti))
         val xmout = mb.newBit()
-        val xvout = fb.newLocal(name1)(tti).asInstanceOf[LocalRef[Any]]
+        val xvout = coerce[Any](fb.newLocal(name1)(tti))
         val i = fb.newLocal[Int]("af_i")
         val len = fb.newLocal[Int]("af_len")
         val bodyenv = env.bind(
@@ -283,8 +281,54 @@ object Emit {
               mv.mux(srvb.setMissing(), srvb.addIRIntermediate(t)(vv)),
               srvb.advance()) }: _*),
           srvb.offset))
+      case x@InsertFields(old, fields, _) =>
+        old.typ match {
+          case oldtype: TStruct =>
+            val (doold, mold, vold) = emit(old)
+            val xo = fb.newLocal[Long]
+            val xmo = mb.newBit()
+            val updateInit = Map(fields.filter { case (name, _) => oldtype.hasField(name) }
+              .map { case (name, v) => name -> (v.typ, emit(v)) }: _*)
+            val appendInit = fields.filter { case (name, _) => !oldtype.hasField(name) }
+              .map { case (_, v) => (v.typ, emit(v)) }
+            val initializers = fields.map { case (_, v) => (v.typ, emit(v)) }
+            val srvb = new StagedRegionValueBuilder(fb, x.typ)
+            present(Code(
+              srvb.start(init = true),
+              Code(
+                doold,
+                xo := coerce[Long](vold),
+                xmo := mold,
+                Code(oldtype.fields.map { f =>
+                  updateInit.get(f.name) match {
+                    case Some((t, (dov, mv, vv))) =>
+                      Code(
+                        dov,
+                        mv.mux(srvb.setMissing(), srvb.addIRIntermediate(t)(vv)),
+                        srvb.advance())
+                    case None =>
+                      Code(
+                        (xmo || oldtype.isFieldMissing(region, xo, f.index)).mux(
+                          srvb.setMissing(),
+                          srvb.addIRIntermediate(f.typ)(region.loadIRIntermediate(f.typ)(oldtype.fieldOffset(xo, f.index)))
+                        ),
+                        srvb.advance())
+                  }
+                }: _*)),
+              Code(appendInit.map { case (t, (dov, mv, vv)) =>
+                Code(
+                  dov,
+                  mv.mux(srvb.setMissing(), srvb.addIRIntermediate(t)(vv)),
+                  srvb.advance()) }: _*),
+              srvb.offset))
+          case _ =>
+            val newIR = MakeStruct(fields)
+            Infer(newIR)
+            emit(newIR)
+        }
+
       case GetField(o, name, _) =>
-        val t = o.typ.asInstanceOf[TStruct]
+        val t = coerce[TStruct](o.typ)
         val fieldIdx = t.fieldIdx(name)
         val (doo, mo, vo) = emit(o)
         val xmo = mb.newBit()
@@ -297,7 +341,7 @@ object Emit {
           xmo || !t.isFieldDefined(region, xo, fieldIdx),
           region.loadIRIntermediate(t.fieldType(fieldIdx))(t.fieldOffset(xo, fieldIdx)))
       case GetFieldMissingness(o, name) =>
-        val t = o.typ.asInstanceOf[TStruct]
+        val t = coerce[TStruct](o.typ)
         val fieldIdx = t.fieldIdx(name)
         val (doo, mo, vo) = emit(o)
         present(Code(doo, mo || !t.isFieldDefined(region, coerce[Long](vo), fieldIdx)))

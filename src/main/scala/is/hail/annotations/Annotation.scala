@@ -1,6 +1,7 @@
 package is.hail.annotations
 
 import is.hail.expr._
+import is.hail.expr.types._
 import is.hail.utils.{ArrayBuilder, Interval}
 import is.hail.variant._
 import org.apache.spark.sql.Row
@@ -76,10 +77,11 @@ object Annotation {
 
         case _: TAltAllele => a.asInstanceOf[AltAllele].toRow
 
-        case _: TInterval =>
-          val i = a.asInstanceOf[Interval[Locus]]
-          Annotation(i.start.toRow,
-            i.end.toRow)
+        case TInterval(pointType, _) =>
+          val i = a.asInstanceOf[Interval]
+          Annotation(
+            expandAnnotation(i.start, pointType),
+            expandAnnotation(i.end, pointType))
 
         // including TChar, TSample
         case _ => a
@@ -127,12 +129,12 @@ object Annotation {
 
   def fromSeq(values: Seq[Any]): Annotation = Row.fromSeq(values)
 
-  def buildInserter(code: String, t: Type, ec: EvalContext, expectedHead: String): (Type, Inserter) = {
+  def buildInserter(code: String, t: TStruct, ec: EvalContext, expectedHead: String): (TStruct, Inserter) = {
     val (paths, types, f) = Parser.parseAnnotationExprs(code, ec, Some(expectedHead))
 
     val inserterBuilder = new ArrayBuilder[Inserter]()
     val finalType = (paths, types).zipped.foldLeft(t) { case (t, (ids, signature)) =>
-      val (s, i) = t.insert(signature, ids)
+      val (s, i) = t.structInsert(signature, ids)
       inserterBuilder += i
       s
     }

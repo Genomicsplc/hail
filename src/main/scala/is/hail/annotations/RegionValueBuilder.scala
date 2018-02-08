@@ -1,6 +1,6 @@
 package is.hail.annotations
 
-import is.hail.expr.{TAltAllele, TArray, TBinary, TBoolean, TCall, TDict, TFloat32, TFloat64, TInt32, TInt64, TInterval, TLocus, TSet, TString, TStruct, TVariant, Type}
+import is.hail.expr.types._
 import is.hail.utils._
 import is.hail.variant.{AltAllele, Locus, Variant}
 import org.apache.spark.sql.Row
@@ -324,6 +324,18 @@ class RegionValueBuilder(var region: Region) {
     addField(t, rv.region, rv.offset, i)
   }
 
+  def addFields(t: TStruct, fromRegion: Region, fromOff: Long, fieldIdx: Array[Int]) {
+    var i = 0
+    while (i < fieldIdx.length) {
+      addField(t, fromRegion, fromOff, fieldIdx(i))
+      i += 1
+    }
+  }
+
+  def addFields(t: TStruct, fromRV: RegionValue, fieldIdx: Array[Int]) {
+    addFields(t, fromRV.region, fromRV.offset, fieldIdx)
+  }
+
   def addElement(t: TArray, fromRegion: Region, fromAOff: Long, i: Int) {
     if (t.isElementDefined(fromRegion, fromAOff, i))
       addRegionValue(t.elementType, fromRegion,
@@ -439,7 +451,7 @@ class RegionValueBuilder(var region: Region) {
         case TSet(elementType, _) =>
           val s = a.asInstanceOf[Set[Annotation]]
             .toArray
-            .sorted(elementType.ordering(true))
+            .sorted(elementType.ordering.toOrdering)
           startArray(s.length)
           s.foreach { x => addAnnotation(elementType, x) }
           endArray()
@@ -448,7 +460,7 @@ class RegionValueBuilder(var region: Region) {
           val m = a.asInstanceOf[Map[Annotation, Annotation]]
             .map { case (k, v) => Row(k, v) }
             .toArray
-            .sorted(td.elementType.ordering(true))
+            .sorted(td.elementType.ordering.toOrdering)
           startArray(m.length)
           m.foreach { case Row(k, v) =>
             startStruct()
@@ -491,10 +503,10 @@ class RegionValueBuilder(var region: Region) {
           endStruct()
 
         case t: TInterval =>
-          val i = a.asInstanceOf[Interval[Locus]]
+          val i = a.asInstanceOf[Interval]
           startStruct()
-          addAnnotation(TLocus(t.gr), i.start)
-          addAnnotation(TLocus(t.gr), i.end)
+          addAnnotation(t.pointType, i.start)
+          addAnnotation(t.pointType, i.end)
           endStruct()
       }
 

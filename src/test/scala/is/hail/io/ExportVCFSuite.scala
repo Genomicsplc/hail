@@ -4,7 +4,7 @@ import is.hail.{SparkSuite, TestUtils}
 import is.hail.annotations.Annotation
 import is.hail.check.Gen
 import is.hail.check.Prop._
-import is.hail.expr._
+import is.hail.expr.types._
 import is.hail.io.vcf.ExportVCF
 import is.hail.utils._
 import is.hail.testUtils._
@@ -81,9 +81,9 @@ class ExportVCFSuite extends SparkSuite {
       hadoopConf.delete(out, recursive = true)
       hadoopConf.delete(out2, recursive = true)
       ExportVCF(vds, out)
-      val vds2 = hc.importVCF(out, nPartitions = Some(nPar1))
+      val vds2 = hc.importVCF(out, nPartitions = Some(nPar1), gr = vds.genomeReference)
       ExportVCF(vds, out2)
-      hc.importVCF(out2, nPartitions = Some(nPar2)).same(vds2)
+      hc.importVCF(out2, nPartitions = Some(nPar2), gr = vds.genomeReference).same(vds2)
     }
 
     p.check()
@@ -232,12 +232,6 @@ class ExportVCFSuite extends SparkSuite {
     TestUtils.interceptFatal("INFO field 'foo': VCF does not support type") {
       ExportVCF(vds
         .annotateVariantsExpr("va.info.foo = {INT: 5}"),
-        out)
-    }
-
-    TestUtils.interceptFatal("export_vcf requires g to have type TStruct") {
-      ExportVCF(vds
-        .annotateGenotypesExpr("g = 5"),
         out)
     }
 

@@ -3,35 +3,36 @@ package is.hail.variant
 import is.hail.{SparkSuite, TestUtils}
 import is.hail.annotations.Annotation
 import is.hail.check.{Gen, Prop}
-import is.hail.expr.{TArray, TString}
+import is.hail.expr.types._
 import is.hail.io.annotators.IntervalList
 import is.hail.utils._
+import is.hail.testUtils._
 import org.testng.annotations.Test
 
 class IntervalSuite extends SparkSuite {
   val gr = GenomeReference.GRCh37
-  implicit val locusOrd = gr.locusOrdering
+  val pord = gr.locusType.ordering
 
-  def genomicInterval(contig: String, start: Int, end: Int): Interval[Locus] =
+  def genomicInterval(contig: String, start: Int, end: Int): Interval =
     Interval(Locus(contig, start), Locus(contig, end))
 
   @Test def test() {
-    val ilist = IntervalTree.apply[Locus](Array(
+    val ilist = IntervalTree.apply(pord, Array(
       genomicInterval("1", 10, 20),
       genomicInterval("1", 30, 40),
       genomicInterval("2", 40, 50)))
 
-    assert(!ilist.contains(Locus("1", 5)))
-    assert(ilist.contains(Locus("1", 10)))
-    assert(ilist.contains(Locus("1", 15)))
-    assert(!ilist.contains(Locus("1", 20)))
-    assert(!ilist.contains(Locus("1", 25)))
-    assert(ilist.contains(Locus("1", 35)))
+    assert(!ilist.contains(pord, Locus("1", 5)))
+    assert(ilist.contains(pord, Locus("1", 10)))
+    assert(ilist.contains(pord, Locus("1", 15)))
+    assert(!ilist.contains(pord, Locus("1", 20)))
+    assert(!ilist.contains(pord, Locus("1", 25)))
+    assert(ilist.contains(pord, Locus("1", 35)))
 
-    assert(!ilist.contains(Locus("2", 30)))
-    assert(ilist.contains(Locus("2", 45)))
+    assert(!ilist.contains(pord, Locus("2", 30)))
+    assert(ilist.contains(pord, Locus("2", 45)))
 
-    assert(!ilist.contains(Locus("3", 1)))
+    assert(!ilist.contains(pord, Locus("3", 1)))
 
     val ex1 = IntervalList.read(hc, "src/test/resources/example1.interval_list")
 
@@ -40,7 +41,7 @@ class IntervalSuite extends SparkSuite {
     ex1.annotate("""interval = interval.start.contig + ":" + interval.start.position + "-" + interval.end.position""")
       .export(f)
 
-    val ex1wr = hc.importTable(f).annotate("interval = Interval(interval)").keyBy("interval")
+    val ex1wr = hc.importTable(f).annotate("interval = LocusInterval(interval)").keyBy("interval")
 
     assert(ex1wr.same(ex1))
 
@@ -49,7 +50,7 @@ class IntervalSuite extends SparkSuite {
   }
 
   @Test def testAll() {
-    val vds = MatrixTable.fromLegacy(hc, VSMFileMetadata(Array.empty[String]),
+    val vds = MatrixTable.fromLegacy[Variant, Annotation](hc, MatrixFileMetadata(Array.empty[String]),
       sc.parallelize(Seq((Variant("1", 100, "A", "T"), (Annotation.empty, Iterable.empty[Annotation])))))
 
     val intervalFile = tmpDir.createTempFile("intervals")
@@ -61,10 +62,8 @@ class IntervalSuite extends SparkSuite {
       out.write("1\t50\t150\t+\tTHING5")
     }
 
-    assert(vds.annotateVariantsTable(IntervalList.read(hc, intervalFile), root = "va", product = true)
-      .variantsAndAnnotations
-      .collect()
-      .head._2.asInstanceOf[IndexedSeq[_]].toSet == Set("THING1", "THING2", "THING3", "THING4", "THING5"))
+    assert(vds.annotateVariantsTable(IntervalList.read(hc, intervalFile), expr = "va.foo = table.map(x => x.target)", product = true)
+        .variantsKT().query("va.map(x => x.foo).collect()[0].toSet()")._1 == Set("THING1", "THING2", "THING3", "THING4", "THING5"))
   }
 
   @Test def testNew() {
@@ -73,15 +72,15 @@ class IntervalSuite extends SparkSuite {
       genomicInterval("1", 30, 40),
       genomicInterval("2", 40, 50))
 
-    val t = IntervalTree.apply[Locus](a)
+    val t = IntervalTree.apply(pord, a)
 
-    assert(t.contains(Locus("1", 15)))
-    assert(t.contains(Locus("1", 30)))
-    assert(!t.contains(Locus("1", 40)))
-    assert(!t.contains(Locus("1", 20)))
-    assert(!t.contains(Locus("1", 25)))
-    assert(!t.contains(Locus("1", 9)))
-    assert(!t.contains(Locus("5", 20)))
+    assert(t.contains(pord, Locus("1", 15)))
+    assert(t.contains(pord, Locus("1", 30)))
+    assert(!t.contains(pord, Locus("1", 40)))
+    assert(!t.contains(pord, Locus("1", 20)))
+    assert(!t.contains(pord, Locus("1", 25)))
+    assert(!t.contains(pord, Locus("1", 9)))
+    assert(!t.contains(pord, Locus("5", 20)))
 
     // Test queries
     val a2 = Array(
@@ -97,9 +96,9 @@ class IntervalSuite extends SparkSuite {
       genomicInterval("2", 42, 43),
       genomicInterval("2", 1, 10))
 
-    val t2 = IntervalTree.annotationTree(a2.map(i => (i, ())))
+    val t2 = IntervalTree.annotationTree(pord, a2.map(i => (i, ())))
 
-    assert(t2.queryIntervals(Locus("1", 30)).toSet == Set(
+    assert(t2.queryIntervals(pord, Locus("1", 30)).toSet == Set(
       genomicInterval("1", 30, 40), genomicInterval("1", 30, 50),
       genomicInterval("1", 29, 31), genomicInterval("1", 30, 31)))
 
@@ -108,19 +107,19 @@ class IntervalSuite extends SparkSuite {
   @Test def properties() {
 
     // greater chance of collision
-    val lgen = Gen.zip(Gen.oneOf("1", "2"),
-      Gen.choose(1, 100))
-    val g = Gen.zip(IntervalTree.gen(lgen),
+    val lgen = Gen.zip(Gen.oneOf("1", "2"), Gen.choose(1, 100))
+      .map { case (c, p) => Locus(c, p) }
+    val g = Gen.zip(IntervalTree.gen(pord, lgen),
       lgen)
 
     val p = Prop.forAll(g) { case (it, locus) =>
       val intervals = it.map(_._1).toSet
 
-      val setResults = intervals.filter(_.contains(locus))
-      val treeResults = it.queryIntervals(locus).toSet
+      val setResults = intervals.filter(_.contains(pord, locus))
+      val treeResults = it.queryIntervals(pord, locus).toSet
 
-      val inSet = intervals.exists(_.contains(locus))
-      val inTree = it.contains(locus)
+      val inSet = intervals.exists(_.contains(pord, locus))
+      val inTree = it.contains(pord, locus)
 
       setResults == treeResults &&
         setResults.nonEmpty == inSet &&
@@ -132,7 +131,7 @@ class IntervalSuite extends SparkSuite {
   @Test def testAnnotateIntervalsAll() {
     val vds = hc.importVCF("src/test/resources/sample2.vcf")
       .annotateVariantsTable(IntervalList.read(hc, "src/test/resources/annotinterall.interval_list"),
-        root = "va.annot",
+        expr = "va.annot = table.map(x => x.target)",
         product = true)
 
     val (t, q) = vds.queryVA("va.annot")
@@ -167,19 +166,21 @@ class IntervalSuite extends SparkSuite {
     Prop.forAll(intervalsGen.filter(_.nonEmpty)) { intervals =>
       hadoopConf.writeTextFile(iList) { out =>
         intervals.foreach { i =>
-          out.write(s"22\t${ i.start.position }\t${ i.end.position }\n")
+          out.write(s"22\t${ i.start.asInstanceOf[Locus].position }\t${ i.end.asInstanceOf[Locus].position }\n")
         }
       }
+
+      val localPOrd = pord
 
       val vdsKeep = vds.filterVariantsTable(IntervalList.read(hc, iList), keep = true)
       val vdsRemove = vds.filterVariantsTable(IntervalList.read(hc, iList), keep = false)
 
       val p1 = vdsKeep.same(vds.copy(rdd = vds.rdd.filter { case (v, _) =>
-          intervals.exists(_.contains(v.asInstanceOf[Variant].locus))
+          intervals.exists(_.contains(localPOrd, v.asInstanceOf[Variant].locus))
       }))
 
       val p2 = vdsRemove.same(vds.copy(rdd = vds.rdd.filter { case (v, _) =>
-        intervals.forall(!_.contains(v.asInstanceOf[Variant].locus))
+        intervals.forall(!_.contains(localPOrd, v.asInstanceOf[Variant].locus))
       }))
 
       val p = p1 && p2
@@ -193,18 +194,23 @@ class IntervalSuite extends SparkSuite {
   }
 
   @Test def testParser() {
+    val gr = GenomeReference.GRCh37
+    val xMax = gr.contigLength("X")
+    val yMax = gr.contigLength("Y")
+    val chr22Max = gr.contigLength("22")
+
     assert(Locus.parseInterval("1:100-1:101", gr) == Interval(Locus("1", 100), Locus("1", 101)))
     assert(Locus.parseInterval("1:100-101", gr) == Interval(Locus("1", 100), Locus("1", 101)))
     assert(Locus.parseInterval("X:100-101", gr) == Interval(Locus("X", 100), Locus("X", 101)))
-    assert(Locus.parseInterval("X:100-end", gr) == Interval(Locus("X", 100), Locus("X", Int.MaxValue)))
-    assert(Locus.parseInterval("X:100-End", gr) == Interval(Locus("X", 100), Locus("X", Int.MaxValue)))
-    assert(Locus.parseInterval("X:100-END", gr) == Interval(Locus("X", 100), Locus("X", Int.MaxValue)))
-    assert(Locus.parseInterval("X:start-101", gr) == Interval(Locus("X", 0), Locus("X", 101)))
-    assert(Locus.parseInterval("X:Start-101", gr) == Interval(Locus("X", 0), Locus("X", 101)))
-    assert(Locus.parseInterval("X:START-101", gr) == Interval(Locus("X", 0), Locus("X", 101)))
-    assert(Locus.parseInterval("X:START-Y:END", gr) == Interval(Locus("X", 0), Locus("Y", Int.MaxValue)))
-    assert(Locus.parseInterval("X-Y", gr) == Interval(Locus("X", 0), Locus("Y", Int.MaxValue)))
-    assert(Locus.parseInterval("1-22", gr) == Interval(Locus("1", 0), Locus("22", Int.MaxValue)))
+    assert(Locus.parseInterval("X:100-end", gr) == Interval(Locus("X", 100), Locus("X", xMax)))
+    assert(Locus.parseInterval("X:100-End", gr) == Interval(Locus("X", 100), Locus("X", xMax)))
+    assert(Locus.parseInterval("X:100-END", gr) == Interval(Locus("X", 100), Locus("X", xMax)))
+    assert(Locus.parseInterval("X:start-101", gr) == Interval(Locus("X", 1), Locus("X", 101)))
+    assert(Locus.parseInterval("X:Start-101", gr) == Interval(Locus("X", 1), Locus("X", 101)))
+    assert(Locus.parseInterval("X:START-101", gr) == Interval(Locus("X", 1), Locus("X", 101)))
+    assert(Locus.parseInterval("X:START-Y:END", gr) == Interval(Locus("X", 1), Locus("Y", yMax)))
+    assert(Locus.parseInterval("X-Y", gr) == Interval(Locus("X", 1), Locus("Y", yMax)))
+    assert(Locus.parseInterval("1-22", gr) == Interval(Locus("1", 1), Locus("22", chr22Max)))
 
     assert(Locus.parseInterval("16:29500000-30200000", gr) == Interval(Locus("16", 29500000), Locus("16", 30200000)))
     assert(Locus.parseInterval("16:29.5M-30.2M", gr) == Interval(Locus("16", 29500000), Locus("16", 30200000)))
@@ -213,14 +219,6 @@ class IntervalSuite extends SparkSuite {
 
     assert(Locus.parseInterval("1:1.111K-2000", gr) == Interval(Locus("1", 1111), Locus("1", 2000)))
     assert(Locus.parseInterval("1:1.111111M-2000000", gr) == Interval(Locus("1", 1111111), Locus("1", 2000000)))
-
-    intercept[IllegalArgumentException] {
-      Locus.parseInterval("X:101-100", gr)
-    }
-
-    intercept[IllegalArgumentException] {
-      Locus.parseInterval("4:start-3:end", gr)
-    }
 
     TestUtils.interceptFatal("invalid interval expression") {
       Locus.parseInterval("4::start-5:end", gr)
@@ -237,5 +235,20 @@ class IntervalSuite extends SparkSuite {
     TestUtils.interceptFatal("invalid interval expression") {
       Locus.parseInterval("1:1.1111111M-2M", gr)
     }
+
+    val gr37 = GenomeReference.GRCh37
+    val gr38 = GenomeReference.GRCh38
+
+    val x = "GL000197.1:3739-GL000202.1:7538"
+    assert(Locus.parseInterval(x, gr37) ==
+      Interval(Locus("GL000197.1", 3739), Locus("GL000202.1", 7538)))
+
+    val y = "HLA-DRB1*13:02:01:5-HLA-DRB1*14:05:01:100"
+    assert(Locus.parseInterval(y, gr38) ==
+      Interval(Locus("HLA-DRB1*13:02:01", 5), Locus("HLA-DRB1*14:05:01", 100)))
+
+    val z = "HLA-DRB1*13:02:01:5-100"
+    assert(Locus.parseInterval(z, gr38) ==
+      Interval(Locus("HLA-DRB1*13:02:01", 5), Locus("HLA-DRB1*13:02:01", 100)))
   }
 }

@@ -1,7 +1,7 @@
 package is.hail.io.plink
 
 import is.hail.sparkextras._
-import is.hail.expr._
+import is.hail.expr.types._
 import is.hail.annotations._
 import is.hail.variant._
 
@@ -11,7 +11,6 @@ object ExportBedBimFam {
 
   def bedRowTransformer(nSamples: Int, rowType: TStruct): Iterator[RegionValue] => Iterator[Array[Byte]] = { it =>
     val hcv = HardCallView(rowType)
-    val rvb = new RegionValueBuilder()
     val rv2 = RegionValue()
     val gtMap = Array(3, 2, 0)
     val nBytes = (nSamples + 3) / 4
@@ -19,7 +18,6 @@ object ExportBedBimFam {
 
     it.map { rv =>
       hcv.setRegion(rv)
-      rvb.set(rv.region)
 
       var b = 0
       var k = 0

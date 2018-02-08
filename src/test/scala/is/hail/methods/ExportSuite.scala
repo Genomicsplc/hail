@@ -1,7 +1,8 @@
 package is.hail.methods
 
 import is.hail.SparkSuite
-import is.hail.expr.{Parser, TFloat64, TInt64}
+import is.hail.expr.Parser
+import is.hail.expr.types._
 import is.hail.utils._
 import is.hail.testUtils._
 import org.testng.annotations.Test
@@ -115,7 +116,7 @@ class ExportSuite extends SparkSuite {
 
     val types = Parser.parseAnnotationTypes(hadoopConf.readFile(out + ".types")(Source.fromInputStream(_).mkString))
     val readBack = vds.annotateVariantsTable(hc.importTable(out, types = types).keyBy("v"),
-      root = "va")
+      expr = "va = table.va")
     assert(vds.same(readBack))
   }
 }

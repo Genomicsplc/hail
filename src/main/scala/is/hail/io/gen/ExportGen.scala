@@ -1,7 +1,7 @@
 package is.hail.io.gen
 
 import is.hail.annotations.{Querier, UnsafeRow}
-import is.hail.expr.TString
+import is.hail.expr.types.TString
 import is.hail.variant.{ArrayGenotypeView, MatrixTable, Variant}
 import is.hail.utils._
 
@@ -37,7 +37,7 @@ object ExportGen {
       }
 
       val localNSamples = vsm.nSamples
-      val localRowType = vsm.rowType
+      val localRowType = vsm.rvRowType
       vsm.rdd2.mapPartitions { it =>
         val sb = new StringBuilder
         val view = new ArrayGenotypeView(localRowType)

@@ -2,9 +2,9 @@ package is.hail.variant
 
 import is.hail.SparkSuite
 import is.hail.check.Prop._
+import is.hail.expr.types._
 import is.hail.utils._
 import is.hail.testUtils._
-import is.hail.expr.{TFloat64, TInt32, TString, TStruct}
 import is.hail.io.vcf.ExportVCF
 import org.testng.annotations.Test
 
@@ -50,14 +50,6 @@ class GenericDatasetSuite extends SparkSuite {
     val gds = hc.importVCF("src/test/resources/sample.vcf.bgz", nPartitions = Some(4))
     ExportVCF(gds, gds_exportvcf_path)
     assert(gds.same(hc.importVCF(gds_exportvcf_path)))
-
-    // not TGenotype or TStruct signature
-    intercept[HailException] {
-      val path = tmpDir.createTempFile(extension = "vcf")
-      ExportVCF(gds
-        .annotateGenotypesExpr("g = 5"),
-        path)
-    }
 
     // struct field
     intercept[HailException] {

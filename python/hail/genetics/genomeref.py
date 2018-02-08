@@ -1,3 +1,4 @@
+from __future__ import absolute_import
 from hail.history import *
 from hail.typecheck import *
 from hail.utils import wrap_to_list
@@ -261,7 +262,7 @@ class GenomeReference(HistoryMixin):
 
         **Notes**
 
-        Use :py:class:`~hail.GenomeReference.read` to reimport the exported reference genome
+        Use :class:`~hail.GenomeReference.read` to reimport the exported reference genome
         in a new HailContext session.
 
         :param str output: Path of JSON file to write.
@@ -287,3 +288,15 @@ class GenomeReference(HistoryMixin):
         gr._par_tuple = None
         super(GenomeReference, gr).__init__()
         return gr
+
+    @handle_py4j
+    def _check_variant(self, v_jrep):
+        self._jrep.checkVariant(v_jrep)
+
+    @handle_py4j
+    def _check_locus(self, l_jrep):
+        self._jrep.checkLocus(l_jrep)
+
+    @handle_py4j
+    def _check_interval(self, interval_jrep):
+        self._jrep.checkInterval(interval_jrep)

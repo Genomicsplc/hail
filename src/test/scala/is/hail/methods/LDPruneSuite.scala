@@ -5,10 +5,11 @@ import is.hail.SparkSuite
 import is.hail.annotations.{Annotation, Region, RegionValue, RegionValueBuilder}
 import is.hail.check.Prop._
 import is.hail.check.{Gen, Properties}
-import is.hail.expr.{TArray, TStruct}
+import is.hail.expr.types._
 import is.hail.stats.RegressionUtils
 import is.hail.variant._
 import is.hail.utils._
+import is.hail.testUtils._
 import org.testng.annotations.Test
 
 case class BitPackedVector(gs: Array[Long], nSamples: Int, mean: Double, stdDevRec: Double) {
@@ -39,19 +40,19 @@ case class BitPackedVector(gs: Array[Long], nSamples: Int, mean: Double, stdDevR
 }
 
 object LDPruneSuite {
-  val rowType = TStruct(
-    "pk" -> GenomeReference.GRCh37.locus,
-    "v" -> GenomeReference.GRCh37.variant,
+  val rvRowType = TStruct(
+    "pk" -> GenomeReference.GRCh37.locusType,
+    "v" -> GenomeReference.GRCh37.variantType,
     "va" -> TStruct(),
     "gs" -> TArray(Genotype.htsGenotypeType)
   )
 
-  val bitPackedVectorViewType = BitPackedVectorView.rowType(rowType.fieldType(0), rowType.fieldType(1))
+  val bitPackedVectorViewType = BitPackedVectorView.rvRowType(rvRowType.fieldType(0), rvRowType.fieldType(1))
 
   def makeRV(gs: Iterable[Annotation]): RegionValue = {
     val gArr = gs.toIndexedSeq
     val rvb = new RegionValueBuilder(Region())
-    rvb.start(rowType)
+    rvb.start(rvRowType)
     rvb.startStruct()
     rvb.setMissing()
     rvb.setMissing()
@@ -83,7 +84,7 @@ object LDPruneSuite {
 
   def toBitPackedVectorRegionValue(rv: RegionValue, nSamples: Int): Option[RegionValue] = {
     val rvb = new RegionValueBuilder(Region())
-    val hcView = HardCallView(rowType)
+    val hcView = HardCallView(rvRowType)
     hcView.setRegion(rv)
 
     rvb.start(bitPackedVectorViewType)
@@ -128,7 +129,7 @@ class LDPruneSuite extends SparkSuite {
 
   def isUncorrelated(vds: MatrixTable, r2Threshold: Double, windowSize: Int): Boolean = {
     val nSamplesLocal = vds.nSamples
-    val r2Matrix = correlationMatrix(vds.typedRDD[Locus, Variant].map { case (v, (va, gs)) => gs }.collect(), nSamplesLocal)
+    val r2Matrix = correlationMatrix(vds.typedRDD[Variant].map { case (v, (va, gs)) => gs }.collect(), nSamplesLocal)
     val variantMap = vds.variants.zipWithIndex().map { case (v, i) => (i.toInt, v.asInstanceOf[Variant]) }.collectAsMap()
 
     r2Matrix.indices.forall { case (i, j) =>
@@ -240,7 +241,7 @@ class LDPruneSuite extends SparkSuite {
         val bv1 = LDPruneSuite.toBitPackedVectorView(v1Ann, nSamples)
         val bv2 = LDPruneSuite.toBitPackedVectorView(v2Ann, nSamples)
 
-        val view = HardCallView(LDPruneSuite.rowType)
+        val view = HardCallView(LDPruneSuite.rvRowType)
 
         val rv1 = LDPruneSuite.makeRV(v1Ann)
         view.setRegion(rv1)
@@ -320,7 +321,7 @@ class LDPruneSuite extends SparkSuite {
     val nSamples = vds.nSamples
     val filteredVDS = vds.copyLegacy(
       genotypeSignature = Genotype.htsGenotypeType,
-      rdd = vds.typedRDD[Locus, Variant]
+      rdd = vds.typedRDD[Variant]
         .filter { case (v, (va, gs)) =>
           v.isBiallelic &&
             LDPruneSuite.toBitPackedVectorView(gs.hardCallIterator, nSamples).isDefined

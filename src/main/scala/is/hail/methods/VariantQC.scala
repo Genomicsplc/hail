@@ -1,7 +1,8 @@
 package is.hail.methods
 
 import is.hail.annotations._
-import is.hail.expr.{TStruct, _}
+import is.hail.expr.Parser
+import is.hail.expr.types._
 import is.hail.stats.LeveneHaldane
 import is.hail.variant.{HTSGenotypeView, MatrixTable}
 import org.apache.spark.util.StatCounter
@@ -133,7 +134,7 @@ object VariantQC {
     vsm.requireRowKeyVariant("variant_qc")
 
     val localNSamples = vsm.nSamples
-    val localRowType = vsm.rowType
+    val localRowType = vsm.rvRowType
 
     vsm.insertIntoRow(() => HTSGenotypeView(localRowType))(VariantQC.signature,
       "va" :: Parser.parseAnnotationRoot(root, Annotation.VARIANT_HEAD), { (view, rv, rvb) =>

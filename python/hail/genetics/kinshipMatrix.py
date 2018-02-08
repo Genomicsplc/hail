@@ -1,4 +1,5 @@
 
+from __future__ import absolute_import
 from hail.history import *
 from hail.typecheck import *
 from hail.utils.java import *
@@ -14,6 +15,16 @@ class KinshipMatrix(HistoryMixin):
     def __init__(self, jkm):
         self._key_schema = None
         self._jkm = jkm
+
+    @classmethod
+    @record_classmethod
+    def _from_block_matrix(cls, sample_schema, bm, sample_ids, n_variants):
+        return cls(Env.hail().methods.KinshipMatrix.apply(
+            Env.hc()._jhc,
+            sample_schema._jtype,
+            bm._jbm,
+            sample_ids,
+            n_variants))
 
     @property
     @handle_py4j

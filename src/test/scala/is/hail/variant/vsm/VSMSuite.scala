@@ -4,10 +4,9 @@ import breeze.linalg.DenseMatrix
 import is.hail.annotations._
 import is.hail.check.Prop._
 import is.hail.check.{Gen, Parameters}
-import is.hail.distributedmatrix.BlockMatrix
-import is.hail.expr._
+import is.hail.distributedmatrix.{BlockMatrix, KeyedBlockMatrix, Keys}
+import is.hail.expr.types._
 import is.hail.table.Table
-import is.hail.sparkextras.OrderedRDD
 import is.hail.utils._
 import is.hail.testUtils._
 import is.hail.variant._
@@ -22,31 +21,6 @@ import scala.collection.mutable
 import scala.language.postfixOps
 import scala.util.Random
 
-object VSMSuite {
-  def checkOrderedRDD[T, K, V](rdd: OrderedRDD[T, K, V])(implicit kOrd: Ordering[K]): Boolean = {
-    import Ordering.Implicits._
-
-    case class PartInfo(min: K, max: K, isSorted: Boolean)
-
-    val partInfo = rdd.mapPartitionsWithIndex { case (i, it) =>
-      if (it.hasNext) {
-        val s = it.map(_._1).toSeq
-
-        Iterator((i, PartInfo(s.head, s.last, s.isSorted)))
-      } else
-        Iterator()
-    }.collect()
-      .sortBy(_._1)
-      .map(_._2)
-
-    partInfo.forall(_.isSorted) &&
-      (partInfo.isEmpty ||
-        partInfo.zip(partInfo.tail).forall { case (pi, pinext) =>
-          pi.max < pinext.min
-        })
-  }
-}
-
 class VSMSuite extends SparkSuite {
 
   @Test def testSame() {
@@ -54,15 +28,15 @@ class VSMSuite extends SparkSuite {
     val vds2 = hc.importVCF("src/test/resources/sample.vcf.gz", force = true)
     assert(vds1.same(vds2))
 
-    val s1mdata = VSMFileMetadata(Array("S1", "S2", "S3"))
+    val s1mdata = MatrixFileMetadata(Array("S1", "S2", "S3"))
     val s1va1: Annotation = null
     val s1va2 = Annotation()
 
-    val s2mdata = VSMFileMetadata(Array("S1", "S2"))
+    val s2mdata = MatrixFileMetadata(Array("S1", "S2"))
     val s2va1: Annotation = null
     val s2va2: Annotation = null
 
-    val s3mdata = VSMFileMetadata(
+    val s3mdata = MatrixFileMetadata(
       Array("S1", "S2", "S3"),
       Annotation.emptyIndexedSeq(3),
       vaSignature = TStruct(
@@ -73,7 +47,7 @@ class VSMSuite extends SparkSuite {
     val s3va2 = Annotation(Annotation("yes"), "no")
     val s3va3 = Annotation(Annotation("no"), "yes")
 
-    val s4mdata = VSMFileMetadata(
+    val s4mdata = MatrixFileMetadata(
       Array("S1", "S2"),
       Annotation.emptyIndexedSeq(2),
       vaSignature = TStruct(
@@ -194,9 +168,12 @@ class VSMSuite extends SparkSuite {
 
   @Test def testWriteRead() {
     val p = forAll(MatrixTable.gen(hc, VSMSubgen.random)) { vds =>
+      GenomeReference.addReference(vds.genomeReference)
       val f = tmpDir.createTempFile(extension = "vds")
       vds.write(f)
-      hc.readVDS(f).same(vds)
+      val result = hc.readVDS(f).same(vds)
+      GenomeReference.removeReference(vds.genomeReference.name)
+      result
     }
 
     p.check()
@@ -298,34 +275,6 @@ class VSMSuite extends SparkSuite {
       "The VSM generator seems non-linear because the magnitude of the R coefficient is less than 0.9")
   }
 
-  @Test def testCoalesce() {
-    val g = for (
-      vsm <- MatrixTable.gen(hc, VSMSubgen.random);
-      k <- Gen.choose(1, math.max(1, vsm.nPartitions)))
-      yield (vsm, k)
-
-    forAll(g) { case (vsm, k) =>
-      val coalesced = vsm.coalesce(k)
-      val n = coalesced.nPartitions
-      implicit val variantOrd = vsm.genomeReference.variantOrdering
-      VSMSuite.checkOrderedRDD(coalesced.typedRDD[Locus, Variant]) && vsm.same(coalesced) && n <= k
-    }.check()
-  }
-
-  @Test def testNaiveCoalesce() {
-    val g = for (
-      vsm <- MatrixTable.gen(hc, VSMSubgen.random);
-      k <- Gen.choose(1, math.max(1, vsm.nPartitions)))
-      yield (vsm, k)
-
-    forAll(g) { case (vsm, k) =>
-      val coalesced = vsm.naiveCoalesce(k)
-      val n = coalesced.nPartitions
-      implicit val variantOrd = vsm.genomeReference.variantOrdering
-      VSMSuite.checkOrderedRDD(coalesced.typedRDD[Locus, Variant]) && vsm.same(coalesced) && n <= k
-    }.check()
-  }
-
   @Test def testOverwrite() {
     val out = tmpDir.createTempFile("out", "vds")
     val vds = hc.importVCF("src/test/resources/sample2.vcf")
@@ -349,70 +298,13 @@ class VSMSuite extends SparkSuite {
     forAll(MatrixTable.gen(hc, VSMSubgen.random)) { vds =>
       val vds2 = vds.annotateVariantsExpr("va.bar = va")
       val kt = vds2.variantsKT()
-      val resultVds = vds2.annotateVariantsTable(kt, expr = "va.foo = table.bar")
+      val resultVds = vds2.annotateVariantsTable(kt, expr = "va.foo = table.va.bar")
       val result = resultVds.rdd.collect()
       val (_, getFoo) = resultVds.queryVA("va.foo")
       val (_, getBar) = resultVds.queryVA("va.bar")
 
       result.forall { case (v, (va, gs)) =>
         getFoo(va) == getBar(va)
-      }
-    }.check()
-  }
-
-  @Test def testAnnotateVariantsKeyTableWithComputedKey() {
-    forAll(MatrixTable.gen(hc, VSMSubgen.random)) { vds =>
-      val vds2 = vds.annotateVariantsExpr("va.key = v.start % 2 == 0")
-
-      val kt = Table(hc, sc.parallelize(Array(Row(true, 1), Row(false, 2))),
-        TStruct(("key", TBoolean()), ("value", TInt32())), Array("key"))
-
-      val resultVds = vds2.annotateVariantsTable(kt, vdsKey = Seq("va.key"), root = "va.foo")
-      val result = resultVds.rdd.collect()
-      val (_, getKey) = resultVds.queryVA("va.key")
-      val (_, getFoo) = resultVds.queryVA("va.foo")
-
-      result.forall { case (v, (va, gs)) =>
-        if (getKey(va).asInstanceOf[Boolean]) {
-          assert(getFoo(va) == 1)
-          getFoo(va) == 1
-        } else {
-          assert(getFoo(va) == 2)
-          getFoo(va) == 2
-        }
-      }
-    }.check()
-  }
-
-  @Test def testAnnotateVariantsKeyTableWithComputedKey2() {
-    forAll(MatrixTable.gen(hc, VSMSubgen.random)) { vds =>
-      val vds2 = vds.annotateVariantsExpr("va.key1 =  v.start % 2 == 0, va.key2 = v.contig.length() % 2 == 0")
-
-      def f(a: Boolean, b: Boolean): Int =
-        if (a)
-          if (b) 1 else 2
-        else if (b) 3 else 4
-
-      def makeAnnotation(a: Boolean, b: Boolean): Row =
-        Row(a, b, f(a, b))
-
-      val mapping = sc.parallelize(Array(
-        makeAnnotation(true, true),
-        makeAnnotation(true, false),
-        makeAnnotation(false, true),
-        makeAnnotation(false, false)))
-
-      val kt = Table(hc, mapping, TStruct(("key1", TBoolean()), ("key2", TBoolean()), ("value", TInt32())), Array("key1", "key2"))
-
-      val resultVds = vds2.annotateVariantsTable(kt, vdsKey = Seq("va.key1", "va.key2"),
-        expr = "va.foo = table")
-      val result = resultVds.rdd.collect()
-      val (_, getKey1) = resultVds.queryVA("va.key1")
-      val (_, getKey2) = resultVds.queryVA("va.key2")
-      val (_, getFoo) = resultVds.queryVA("va.foo")
-
-      result.forall { case (v, (va, gs)) =>
-        getFoo(va) == f(getKey1(va).asInstanceOf[Boolean], getKey2(va).asInstanceOf[Boolean])
       }
     }.check()
   }
@@ -432,7 +324,7 @@ class VSMSuite extends SparkSuite {
 
     def getGenotypes(vds: MatrixTable): RDD[((Variant, Annotation), Annotation)] = {
       val sampleIds = vds.sampleIds
-      vds.typedRDD[Locus, Variant].flatMap { case (v, (_, gs)) =>
+      vds.typedRDD[Variant].flatMap { case (v, (_, gs)) =>
         gs.zip(sampleIds).map { case (g, s) =>
           ((v, s), g)
         }
@@ -473,4 +365,28 @@ class VSMSuite extends SparkSuite {
       assert(BlockMatrix.read(hc, dirname).toLocalMatrix() === lm)
     }
   }
+  
+  @Test def testWriteKeyedBlockMatrix() {
+    val dirname = tmpDir.createTempFile()
+    val nSamples = 6
+    val nVariants = 9
+    val vsm = hc.baldingNicholsModel(1, nSamples, nVariants, Some(4))      
+    
+    val data = vsm.collect().zipWithIndex.flatMap { 
+      case (row, v) => row.getAs[IndexedSeq[Row]](3).zipWithIndex.map {
+        case (gt, s) => (gt.getInt(0) + (v + 1) + s).toDouble
+      }
+    }
+    val lm = new DenseMatrix[Double](nSamples, nVariants, data).t // data is row major
+    val rowKeys = new Keys(TVariant(GenomeReference.defaultReference), Array.tabulate(nVariants)(i => Variant("1", i + 1, "A", "C")))
+    val colKeys = new Keys(TString(), Array.tabulate(nSamples)(_.toString))
+    
+    vsm.writeKeyedBlockMatrix(dirname, "g.GT.gt + v.start + s.toInt32()", blockSize = 3)
+    
+    val kbm = KeyedBlockMatrix.read(hc, dirname)
+    
+    assert(kbm.bm.toLocalMatrix() === lm)
+    kbm.rowKeys.get.assertSame(rowKeys)
+    kbm.colKeys.get.assertSame(colKeys)    
+  }  
 }

@@ -2,8 +2,8 @@ package is.hail.utils
 
 import is.hail.SparkSuite
 import is.hail.check._
-import is.hail.expr._
-import is.hail.variant.{GenomeReference, VSMSubgen, MatrixTable}
+import is.hail.expr.types._
+import is.hail.variant.{GenomeReference, MatrixTable, VSMSubgen}
 import org.testng.annotations.Test
 
 import scala.io.Source
@@ -95,12 +95,16 @@ class TextTableSuite extends SparkSuite {
     val p = Prop.forAll(MatrixTable.gen(hc, VSMSubgen.realistic)
       .filter(vds => vds.countVariants > 0 && !vds.vaSignature.isOfType(TFloat64()))) { vds: MatrixTable =>
 
+      GenomeReference.addReference(vds.genomeReference)
       vds.variantsKT().export(outPath, typesFile = outPath + ".types")
 
       val types = Type.parseMap(hadoopConf.readFile(outPath + ".types")(Source.fromInputStream(_).mkString))
 
       val kt = hc.importTable(outPath, types = types).keyBy("v")
-      vds.annotateVariantsTable(kt, root = "va").same(vds)
+      val isSame = vds.annotateVariantsTable(kt, expr = "va = table.va").same(vds)
+
+      GenomeReference.removeReference(vds.genomeReference.name)
+      isSame
     }
 
     p.check()

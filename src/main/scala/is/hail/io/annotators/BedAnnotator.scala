@@ -1,7 +1,7 @@
 package is.hail.io.annotators
 
 import is.hail.HailContext
-import is.hail.expr._
+import is.hail.expr.types._
 import is.hail.table.Table
 import is.hail.utils.{Interval, _}
 import is.hail.variant._
@@ -38,11 +38,11 @@ object BedAnnotator {
     val expectedLength = if (hasTarget) 4 else 3
 
     val schema = if (hasTarget)
-      TStruct("interval" -> TInterval(gr), "target" -> TString())
+      TStruct("interval" -> TInterval(TLocus(gr)), "target" -> TString())
     else
-      TStruct("interval" -> TInterval(gr))
+      TStruct("interval" -> TInterval(TLocus(gr)))
 
-    implicit val locusOrd = gr.locusOrdering
+    implicit val ord = TInterval(gr.locusType).ordering
 
     val rdd = hc.sc.textFileLines(filename)
       .filter(line =>

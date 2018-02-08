@@ -2,106 +2,19 @@ package is.hail.expr
 
 import is.hail.HailContext
 import is.hail.annotations._
-import is.hail.asm4s.FunctionBuilder
 import is.hail.expr.ir._
 import is.hail.table.TableLocalValue
+import is.hail.expr.types._
 import is.hail.methods.Aggregators
 import is.hail.sparkextras._
 import is.hail.rvd._
-import is.hail.variant.{VSMFileMetadata, VSMLocalValue, VSMMetadata}
+import is.hail.variant.{GenomeReference, Genotype, MatrixFileMetadata}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.Row
 import is.hail.utils._
 import org.apache.spark.SparkContext
 import org.apache.spark.broadcast.Broadcast
 import org.json4s.jackson.JsonMethods
-
-case class MatrixType(
-  metadata: VSMMetadata) extends BaseType {
-  def globalType: Type = metadata.globalSignature
-
-  def sType: Type = metadata.sSignature
-
-  def saType: Type = metadata.saSignature
-
-  def locusType: Type = vType match {
-    case t: TVariant => TLocus(t.gr)
-    case _ => vType
-  }
-
-  def vType: Type = metadata.vSignature
-
-  def vaType: Type = metadata.vaSignature
-
-  def genotypeType: Type = metadata.genotypeSignature
-
-  def rowType: TStruct =
-    TStruct(
-      "pk" -> locusType,
-      "v" -> vType,
-      "va" -> vaType,
-      "gs" -> TArray(genotypeType))
-
-  def orderedRVType: OrderedRVType = {
-    new OrderedRVType(Array("pk"),
-      Array("pk", "v"),
-      rowType)
-  }
-
-  def pkType: TStruct = orderedRVType.pkType
-
-  def kType: TStruct = orderedRVType.kType
-
-  def sampleEC: EvalContext = {
-    val aggregationST = Map(
-      "global" -> (0, globalType),
-      "s" -> (1, sType),
-      "sa" -> (2, saType),
-      "g" -> (3, genotypeType),
-      "v" -> (4, vType),
-      "va" -> (5, vaType))
-    EvalContext(Map(
-      "global" -> (0, globalType),
-      "s" -> (1, sType),
-      "sa" -> (2, saType),
-      "gs" -> (3, TAggregable(genotypeType, aggregationST))))
-  }
-
-  def variantEC: EvalContext = {
-    val aggregationST = Map(
-      "global" -> (0, globalType),
-      "v" -> (1, vType),
-      "va" -> (2, vaType),
-      "g" -> (3, genotypeType),
-      "s" -> (4, sType),
-      "sa" -> (5, saType))
-    EvalContext(Map(
-      "global" -> (0, globalType),
-      "v" -> (1, vType),
-      "va" -> (2, vaType),
-      "gs" -> (3, TAggregable(genotypeType, aggregationST))))
-  }
-
-  def genotypeEC: EvalContext = {
-    EvalContext(Map(
-      "global" -> (0, globalType),
-      "v" -> (1, vType),
-      "va" -> (2, vaType),
-      "s" -> (3, sType),
-      "sa" -> (4, saType),
-      "g" -> (5, genotypeType)))
-  }
-
-  def copy(globalType: Type = globalType,
-    sType: Type = sType, saType: Type = saType,
-    vType: Type = vType, vaType: Type = vaType,
-    genotypeType: Type = genotypeType): MatrixType =
-    MatrixType(metadata = metadata.copy(
-      globalSignature = globalType,
-      sSignature = sType, saSignature = saType,
-      vSignature = vType, vaSignature = vaType,
-      genotypeSignature = genotypeType))
-}
 
 object BaseIR {
   def genericRewriteTopDown(ast: BaseIR, rule: PartialFunction[BaseIR, BaseIR]): BaseIR = {
@@ -168,90 +81,34 @@ abstract class BaseIR {
   }
 }
 
+object MatrixLocalValue {
+  def apply(sampleIds: IndexedSeq[Annotation]): MatrixLocalValue =
+    MatrixLocalValue(Annotation.empty,
+      sampleIds,
+      Annotation.emptyIndexedSeq(sampleIds.length))
+}
+
+case class MatrixLocalValue(
+  globalAnnotation: Annotation,
+  sampleIds: IndexedSeq[Annotation],
+  sampleAnnotations: IndexedSeq[Annotation]) {
+  assert(sampleIds.length == sampleAnnotations.length)
+
+  def nSamples: Int = sampleIds.length
+
+  def dropSamples(): MatrixLocalValue = MatrixLocalValue(globalAnnotation,
+    IndexedSeq.empty[Annotation],
+    IndexedSeq.empty[Annotation])
+}
+
 object MatrixValue {
-  def apply(
-    typ: MatrixType,
-    localValue: VSMLocalValue,
-    rdd: OrderedRDD[Annotation, Annotation, (Any, Iterable[Annotation])]): MatrixValue = {
-    implicit val kOk: OrderedKey[Annotation, Annotation] = typ.vType.orderedKey
-    val sc = rdd.sparkContext
-    val localRowType = typ.rowType
-    val localGType = typ.genotypeType
-    val localNSamples = localValue.nSamples
-    val rangeBoundsType = TArray(typ.pkType)
-    new MatrixValue(typ, localValue,
-      OrderedRVD(typ.orderedRVType,
-        new OrderedRVPartitioner(rdd.orderedPartitioner.numPartitions,
-          typ.orderedRVType.partitionKey,
-          typ.orderedRVType.kType,
-          UnsafeIndexedSeq(rangeBoundsType,
-            rdd.orderedPartitioner.rangeBounds.map(b => Row(b)))),
-        rdd.mapPartitions { it =>
-          val region = Region()
-          val rvb = new RegionValueBuilder(region)
-          val rv = RegionValue(region)
 
-          it.map { case (v, (va, gs)) =>
-            region.clear()
-            rvb.start(localRowType)
-            rvb.startStruct()
-            rvb.addAnnotation(localRowType.fieldType(0), kOk.project(v))
-            rvb.addAnnotation(localRowType.fieldType(1), v)
-            rvb.addAnnotation(localRowType.fieldType(2), va)
-            rvb.startArray(localNSamples)
-            var i = 0
-            val git = gs.iterator
-            while (git.hasNext) {
-              rvb.addAnnotation(localGType, git.next())
-              i += 1
-            }
-            rvb.endArray()
-            rvb.endStruct()
-
-            rv.setOffset(rvb.end())
-            rv
-          }
-        }))
-  }
 }
 
 case class MatrixValue(
   typ: MatrixType,
-  localValue: VSMLocalValue,
+  localValue: MatrixLocalValue,
   rdd2: OrderedRVD) {
-
-  def rdd: OrderedRDD[Annotation, Annotation, (Annotation, Iterable[Annotation])] = {
-    warn("converting OrderedRVD => OrderedRDD")
-
-    implicit val kOk: OrderedKey[Annotation, Annotation] = typ.vType.orderedKey
-
-    import kOk._
-
-    val localRowType = typ.rowType
-    val localNSamples = localValue.nSamples
-    OrderedRDD(
-      rdd2.map { rv =>
-        val ur = new UnsafeRow(localRowType, rv.region.copy(), rv.offset)
-
-        val gs = ur.getAs[IndexedSeq[Annotation]](3)
-        assert(gs.length == localNSamples)
-
-        (ur.get(1),
-          (ur.get(2),
-            ur.getAs[IndexedSeq[Annotation]](3): Iterable[Annotation]))
-      },
-      OrderedPartitioner(
-        rdd2.partitioner.rangeBounds.map { b =>
-          b.asInstanceOf[Row].get(0)
-        }.toArray(kOk.pkct),
-        rdd2.partitioner.numPartitions))
-  }
-
-  def copyRDD(typ: MatrixType = typ,
-    localValue: VSMLocalValue = localValue,
-    rdd: OrderedRDD[Annotation, Annotation, (Any, Iterable[Annotation])]): MatrixValue = {
-    MatrixValue(typ, localValue, rdd)
-  }
 
   def sparkContext: SparkContext = rdd2.sparkContext
 
@@ -272,7 +129,7 @@ case class MatrixValue(
   def sampleIdsAndAnnotations: IndexedSeq[(Annotation, Annotation)] = sampleIds.zip(sampleAnnotations)
 
   def filterSamplesKeep(keep: Array[Int]): MatrixValue = {
-    val rowType = typ.rowType
+    val rowType = typ.rvRowType
     val keepType = TArray(!TInt32())
     val makeF = ir.Compile("row", ir.RegionValueRep[Long](rowType),
       "keep", ir.RegionValueRep[Long](keepType),
@@ -368,10 +225,10 @@ case class MatrixLiteral(
 case class MatrixRead(
   path: String,
   nPartitions: Int,
-  fileMetadata: VSMFileMetadata,
+  fileMetadata: MatrixFileMetadata,
   dropSamples: Boolean,
   dropVariants: Boolean) extends MatrixIR {
-  def typ: MatrixType = MatrixType(fileMetadata.metadata)
+  def typ: MatrixType = fileMetadata.matrixType
 
   override def partitionCounts: Option[Array[Long]] = fileMetadata.partitionCounts
 
@@ -383,7 +240,6 @@ case class MatrixRead(
   }
 
   def execute(hc: HailContext): MatrixValue = {
-    val metadata = fileMetadata.metadata
     val localValue =
       if (dropSamples)
         fileMetadata.localValue.dropSamples()
@@ -398,9 +254,9 @@ case class MatrixRead(
           typ.orderedRVType,
           OrderedRVPartitioner(hc.sc,
             hc.hadoopConf.readFile(path + "/partitioner.json.gz")(JsonMethods.parse(_))),
-          hc.readRows(path, typ.rowType, nPartitions))
+          hc.readRows(path, typ.rvRowType, nPartitions))
         if (dropSamples) {
-          val localRowType = typ.rowType
+          val localRowType = typ.rvRowType
           rdd = rdd.mapPartitionsPreservesPartitioning(typ.orderedRVType) { it =>
             var rv2b = new RegionValueBuilder()
             var rv2 = RegionValue()
@@ -455,7 +311,7 @@ case class FilterSamples(
     val prev = child.execute(hc)
 
     val localGlobalAnnotation = prev.localValue.globalAnnotation
-    val sas = typ.metadata.saSignature
+    val sas = typ.saType
     val ec = typ.sampleEC
 
     val f: () => java.lang.Boolean = Parser.evalTypedExpr[java.lang.Boolean](pred, ec)
@@ -488,14 +344,14 @@ case class FilterVariants(
     val prev = child.execute(hc)
 
     val localGlobalAnnotation = prev.localValue.globalAnnotation
-    val ec = child.typ.variantEC
+    val ec = prev.typ.variantEC
 
     val f: () => java.lang.Boolean = Parser.evalTypedExpr[java.lang.Boolean](pred, ec)
 
     val aggregatorOption = Aggregators.buildVariantAggregations(
       prev.rdd2.sparkContext, prev.typ, prev.localValue, ec)
 
-    val localPrevRowType = prev.typ.rowType
+    val localPrevRowType = prev.typ.rvRowType
     val p = (rv: RegionValue) => {
       val ur = new UnsafeRow(localPrevRowType, rv.region.copy(), rv.offset)
 
@@ -536,17 +392,7 @@ case class TableValue(typ: TableType, localValue: TableLocalValue, rvd: RVD) {
   }
 }
 
-case class TableType(rowType: TStruct, key: Array[String], globalType: TStruct) extends BaseType {
-  def rowEC: EvalContext = EvalContext(rowType.fields.map { f => f.name -> f.typ } ++
-      globalType.fields.map { f => f.name -> f.typ }: _*)
-  def fields: Map[String, Type] = Map(rowType.fields.map { f => f.name -> f.typ } ++ globalType.fields.map { f => f.name -> f.typ }: _*)
 
-  def remapIR(ir: IR): IR = ir match {
-    case Ref(y, _) if rowType.selfField(y).isDefined => GetField(In(0, rowType), y, rowType.field(y).typ)
-    case Ref(y, _) if globalType.selfField(y).isDefined => GetField(In(1, globalType), y, globalType.field(y).typ)
-    case ir2 => Recur(remapIR)(ir2)
-  }
-}
 
 object TableIR {
   def optimize(ir: TableIR): TableIR = {
@@ -565,13 +411,19 @@ abstract sealed class TableIR extends BaseIR {
 
   def partitionCounts: Option[Array[Long]] = None
 
+  def env: Env[IR] = {
+    Env.empty[IR]
+      .bind(typ.rowType.fieldNames.map {f => (f, GetField(In(0, typ.rowType), f)) }:_*)
+      .bind(typ.globalType.fieldNames.map {f => (f, GetField(In(1, typ.globalType), f)) }:_*)
+  }
+
   def execute(hc: HailContext): TableValue
 }
 
 case class TableLiteral(value: TableValue) extends TableIR {
-  def typ: TableType = value.typ
+  val typ: TableType = value.typ
 
-  def children: IndexedSeq[BaseIR] = Array.empty[BaseIR]
+  val children: IndexedSeq[BaseIR] = Array.empty[BaseIR]
 
   def copy(newChildren: IndexedSeq[BaseIR]): TableLiteral = {
     assert(newChildren.isEmpty)
@@ -590,7 +442,7 @@ case class TableRead(path: String,
 
   val typ: TableType = ktType
 
-  def children: IndexedSeq[BaseIR] = Array.empty[BaseIR]
+  val children: IndexedSeq[BaseIR] = Array.empty[BaseIR]
 
   def copy(newChildren: IndexedSeq[BaseIR]): TableRead = {
     assert(newChildren.isEmpty)
@@ -603,26 +455,70 @@ case class TableRead(path: String,
       if (dropRows)
         RVD.empty(hc.sc, typ.rowType)
       else
-        RVD(typ.rowType,hc.readRows(path, typ.rowType, nPartitions)))
+        RVD(typ.rowType, hc.readRows(path, typ.rowType, nPartitions)))
   }
 }
 
 case class TableFilter(child: TableIR, pred: IR) extends TableIR {
-  def children: IndexedSeq[BaseIR] = Array(child, pred)
+  val children: IndexedSeq[BaseIR] = Array(child, pred)
 
-  def typ: TableType = child.typ
+  val typ: TableType = child.typ
 
   def copy(newChildren: IndexedSeq[BaseIR]): TableFilter = {
     assert(newChildren.length == 2)
     TableFilter(newChildren(0).asInstanceOf[TableIR], newChildren(1).asInstanceOf[IR])
   }
+
   def execute(hc: HailContext): TableValue = {
     val ktv = child.execute(hc)
-    val mappedPred = typ.remapIR(pred)
-    Infer(mappedPred)
-    val fb = FunctionBuilder.functionBuilder[Region, Long, Boolean, Long, Boolean, Boolean]
-    Emit(mappedPred, fb)
-    val f = fb.result()
+    val f = ir.Compile(child.env, ir.RegionValueRep[Long](child.typ.rowType),
+      ir.RegionValueRep[Long](child.typ.globalType),
+      ir.RegionValueRep[Boolean](TBoolean()),
+      pred)
     ktv.filter((rv, globalRV) => f()(rv.region, rv.offset, false, globalRV.offset, false))
   }
 }
+
+case class TableAnnotate(child: TableIR, paths: IndexedSeq[String], preds: IndexedSeq[IR]) extends TableIR {
+
+  val children: IndexedSeq[BaseIR] = Array(child) ++ preds
+
+  private val newIR: IR = InsertFields(In(0, child.typ.rowType), paths.zip(preds.map(child.typ.remapIR(_))).toArray)
+
+  val typ: TableType = {
+    Infer(newIR, None, child.typ.env)
+    child.typ.copy(rowType = newIR.typ.asInstanceOf[TStruct])
+  }
+
+  def copy(newChildren: IndexedSeq[BaseIR]): TableAnnotate = {
+    assert(newChildren.length == children.length)
+    TableAnnotate(newChildren(0).asInstanceOf[TableIR], paths, newChildren.tail.asInstanceOf[IndexedSeq[IR]])
+  }
+
+  def execute(hc: HailContext): TableValue = {
+    val tv = child.execute(hc)
+    val f = ir.Compile(child.env, ir.RegionValueRep[Long](child.typ.rowType),
+      ir.RegionValueRep[Long](child.typ.globalType),
+      ir.RegionValueRep[Long](typ.rowType),
+      newIR)
+    val globals = tv.localValue.globals
+    val gType = typ.globalType
+    TableValue(typ,
+      tv.localValue,
+      tv.rvd.mapPartitions(typ.rowType) { it =>
+      val globalRV = RegionValue()
+      val globalRVb = new RegionValueBuilder()
+      val rv2 = RegionValue()
+      val newRow = f()
+      it.map { rv =>
+        globalRVb.set(rv.region)
+        globalRVb.start(gType)
+        globalRVb.addAnnotation(gType, globals)
+        globalRV.set(rv.region, globalRVb.end())
+        rv2.set(rv.region, newRow(rv.region, rv.offset, false, globalRV.offset, false))
+        rv2
+      }
+    })
+  }
+}
+

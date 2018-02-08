@@ -1,4 +1,5 @@
-from hail.typecheck.check import *
+from __future__ import absolute_import
+from .check import *
 
 __all__ = ['typecheck',
            'typecheck_method',
@@ -18,4 +19,5 @@ __all__ = ['typecheck',
            'lazy',
            'enumeration',
            'identity',
-           'transformed']
+           'transformed',
+           'func_spec']

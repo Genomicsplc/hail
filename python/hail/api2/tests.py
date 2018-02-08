@@ -3,8 +3,13 @@ Unit tests for Hail.
 """
 from __future__ import print_function  # Python 2 and 3 print compatibility
 
+from __future__ import absolute_import
 import unittest
+import random
 from hail2 import *
+from hail.utils.misc import test_file
+import six
+from six.moves import zip
 
 hc = None
 
@@ -28,21 +33,20 @@ def schema_eq(x, y):
 
 def convert_struct_to_dict(x):
     if isinstance(x, Struct):
-        return {k: convert_struct_to_dict(v) for k, v in x._attrs.iteritems()}
+        return {k: convert_struct_to_dict(v) for k, v in six.iteritems(x._fields)}
     elif isinstance(x, list):
         return [convert_struct_to_dict(elt) for elt in x]
     elif isinstance(x, tuple):
         return tuple([convert_struct_to_dict(elt) for elt in x])
     elif isinstance(x, dict):
-        return {k: convert_struct_to_dict(v) for k, v in x.iteritems()}
+        return {k: convert_struct_to_dict(v) for k, v in six.iteritems(x)}
     else:
         return x
 
 
 class TableTests(unittest.TestCase):
     def test_conversion(self):
-        test_resources = 'src/test/resources'
-        kt_old = hc.import_table(test_resources + '/sampleAnnotations.tsv', impute=True).to_hail1()
+        kt_old = hc.import_table(test_file('sampleAnnotations.tsv'), impute=True).to_hail1()
         kt_new = kt_old.to_hail2()
         kt_old2 = kt_new.to_hail1()
         self.assertListEqual(kt_new.columns, ['Sample', 'Status', 'qPhen'])
@@ -165,7 +169,7 @@ class TableTests(unittest.TestCase):
         results = kt.aggregate(q1=agg.sum(kt.b),
                                q2=agg.count(),
                                q3=agg.collect(kt.e),
-                               q4=agg.collect(agg.filter(kt.e, (kt.d >= 5) | (kt.a == 0))))
+                               q4=agg.collect(agg.filter((kt.d >= 5) | (kt.a == 0), kt.e)))
 
         self.assertEqual(results.q1, 8)
         self.assertEqual(results.q2, 3)
@@ -187,6 +191,23 @@ class TableTests(unittest.TestCase):
         self.assertEqual(kt.filter((kt.c != 20) & (kt.a == 4)).count(), 1)
         self.assertEqual(kt.filter(True).count(), 3)
 
+    def test_transmute(self):
+        schema = TStruct(['a', 'b', 'c', 'd', 'e', 'f', 'g'],
+                         [TInt32(), TInt32(), TInt32(), TInt32(), TString(), TArray(TInt32()),
+                          TStruct(['x', 'y'], [TBoolean(), TInt32()])])
+
+        rows = [{'a': 4, 'b': 1, 'c': 3, 'd': 5, 'e': "hello", 'f': [1, 2, 3], 'g': {'x': True, 'y': 2}},
+                {'a': 0, 'b': 5, 'c': 13, 'd': -1, 'e': "cat", 'f': [], 'g': {'x': True, 'y': 2}},
+                {'a': 4, 'b': 2, 'c': 20, 'd': 3, 'e': "dog", 'f': [5, 6, 7], 'g': None}]
+        df = Table.parallelize(rows, schema)
+
+        df = df.transmute(h = df.a + df.b + df.c + df.g.y)
+        r = df.select('h').collect()
+
+        self.assertEqual(df.columns, ['d', 'e', 'f', 'h'])
+        self.assertEqual(r, [Struct(h=x) for x in [10, 20, None]])
+
+
     def test_select(self):
         schema = TStruct(['a', 'b', 'c', 'd', 'e', 'f', 'g'],
                          [TInt32(), TInt32(), TInt32(), TInt32(), TString(), TArray(TInt32()),
@@ -201,7 +222,7 @@ class TableTests(unittest.TestCase):
         self.assertEqual(kt.select(kt.a, kt.e).columns, ['a', 'e'])
         self.assertEqual(kt.select(*[kt.a, kt.e]).columns, ['a', 'e'])
         self.assertEqual(kt.select(kt.a, foo=kt.a + kt.b - kt.c - kt.d).columns, ['a', 'foo'])
-        self.assertEqual(kt.select(kt.a, *kt.g, foo=kt.a + kt.b - kt.c - kt.d).columns, ['a', 'x', 'y', 'foo'])
+        self.assertEqual(set(kt.select(kt.a, foo=kt.a + kt.b - kt.c - kt.d, **kt.g).columns), {'a', 'foo', 'x', 'y'})
 
     def test_aggregate(self):
         schema = TStruct(['status', 'GT', 'qPheno'],
@@ -232,14 +253,13 @@ class TableTests(unittest.TestCase):
                            ).to_hail1().take(1)[0])
 
         expected = {u'status': 0,
-                    u'x13': {u'nCalled': 2L, u'expectedHoms': 1.64, u'Fstat': -1.777777777777777, u'nTotal': 2L,
-                             u'observedHoms': 1L},
+                    u'x13': {u'nCalled': 2, u'expectedHoms': 1.64, u'Fstat': -1.777777777777777, u'observedHoms': 1},
                     u'x14': {u'AC': [3, 1], u'AF': [0.75, 0.25], u'GC': [1, 1, 0], u'AN': 4},
                     u'x15': {u'a': 5, u'c': {u'banana': u'apple'}, u'b': u'foo'},
-                    u'x10': {u'min': 3.0, u'max': 13.0, u'sum': 16.0, u'stdev': 5.0, u'nNotMissing': 2L, u'mean': 8.0},
-                    u'x8': 1L, u'x9': 0.0, u'x16': u'apple',
+                    u'x10': {u'min': 3.0, u'max': 13.0, u'sum': 16.0, u'stdev': 5.0, u'nNotMissing': 2, u'mean': 8.0},
+                    u'x8': 1, u'x9': 0.0, u'x16': u'apple',
                     u'x11': {u'rExpectedHetFrequency': 0.5, u'pHWE': 0.5},
-                    u'x2': [3, 4, 13, 14], u'x3': 3, u'x1': [6, 26], u'x6': 39L, u'x7': 2L, u'x4': 13, u'x5': 16}
+                    u'x2': [3, 4, 13, 14], u'x3': 3, u'x1': [6, 26], u'x6': 39, u'x7': 2, u'x4': 13, u'x5': 16}
 
         self.assertDictEqual(result, expected)
 
@@ -259,22 +279,25 @@ class TableTests(unittest.TestCase):
         self.assertRaises(NotImplementedError, f)
 
     def test_joins(self):
-        kt = Table.range(1).drop('index')
+        kt = Table.range(1).drop('idx')
         kt = kt.annotate(a='foo')
 
-        kt1 = Table.range(1).drop('index')
+        kt1 = Table.range(1).drop('idx')
         kt1 = kt1.annotate(a='foo', b='bar').key_by('a')
 
-        kt2 = Table.range(1).drop('index')
+        kt2 = Table.range(1).drop('idx')
         kt2 = kt2.annotate(b='bar', c='baz').key_by('b')
 
-        kt3 = Table.range(1).drop('index')
+        kt3 = Table.range(1).drop('idx')
         kt3 = kt3.annotate(c='baz', d='qux').key_by('c')
 
-        kt4 = Table.range(1).drop('index')
+        kt4 = Table.range(1).drop('idx')
         kt4 = kt4.annotate(d='qux', e='quam').key_by('d')
 
         ktr = kt.annotate(e=kt4[kt3[kt2[kt1[kt.a].b].c].d].e)
+        self.assertTrue(ktr.aggregate(result=agg.collect(ktr.e)).result == ['quam'])
+
+        ktr = kt.select(e=kt4[kt3[kt2[kt1[kt.a].b].c].d].e)
         self.assertTrue(ktr.aggregate(result=agg.collect(ktr.e)).result == ['quam'])
 
         self.assertEqual(kt.filter(kt4[kt3[kt2[kt1[kt.a].b].c].d].e == 'quam').count(), 1)
@@ -301,16 +324,15 @@ class TableTests(unittest.TestCase):
 
     def test_drop(self):
         kt = Table.range(10)
-        kt = kt.annotate(sq=kt.index ** 2, foo='foo', bar='bar')
+        kt = kt.annotate(sq=kt.idx ** 2, foo='foo', bar='bar')
 
-        self.assertEqual(kt.drop('index', 'foo').columns, ['sq', 'bar'])
-        self.assertEqual(kt.drop(kt['index'], kt['foo']).columns, ['sq', 'bar'])
+        self.assertEqual(kt.drop('idx', 'foo').columns, ['sq', 'bar'])
+        self.assertEqual(kt.drop(kt['idx'], kt['foo']).columns, ['sq', 'bar'])
 
 
 class MatrixTests(unittest.TestCase):
     def get_vds(self, min_partitions=None):
-        test_resources = 'src/test/resources/'
-        return hc.import_vcf(test_resources + "sample.vcf", min_partitions=min_partitions)
+        return hc.import_vcf(test_file("sample.vcf"), min_partitions=min_partitions)
 
     def testConversion(self):
         vds = self.get_vds()
@@ -396,8 +418,8 @@ class MatrixTests(unittest.TestCase):
         qss = vds.aggregate_cols(x=agg.collect(vds.s),
                                  y=agg.collect(vds.y1))
 
-        qgs = vds.aggregate_entries(x=agg.collect(agg.filter(vds.y1, False)),
-                                    y=agg.collect(agg.filter(vds.GT, functions.rand_bool(0.1))))
+        qgs = vds.aggregate_entries(x=agg.collect(agg.filter(False, vds.y1)),
+                                    y=agg.collect(agg.filter(functions.rand_bool(0.1), vds.GT)))
 
     def test_drop(self):
         vds = self.get_vds()
@@ -440,14 +462,111 @@ class MatrixTests(unittest.TestCase):
         rt = vds.rows_table()
         ct = vds.cols_table()
 
+        vds.annotate_rows(**rt[vds.v])
+
         self.assertTrue(rt.forall(rt.y2 == 2))
         self.assertTrue(ct.forall(ct.c2 == 2))
+
+    def test_table_join(self):
+        ds = self.get_vds()
+        # test different row schemas
+        self.assertTrue(ds.union_cols(ds.drop(ds.info))
+                        .count_rows(), 346)
 
     def test_naive_coalesce(self):
         vds = self.get_vds(min_partitions=8)
         self.assertEqual(vds.num_partitions(), 8)
         repart = vds.naive_coalesce(2)
         self.assertTrue(vds._same(repart))
+
+    def tests_unions(self):
+        dataset = hc.import_vcf('src/test/resources/sample2.vcf')
+
+        # test union_rows
+        ds1 = dataset.filter_rows(dataset.v.start % 2 == 1)
+        ds2 = dataset.filter_rows(dataset.v.start % 2 == 0)
+
+        datasets = [ds1, ds2]
+        r1 = ds1.union_rows(ds2)
+        r2 = MatrixTable.union_rows(*datasets)
+
+        self.assertTrue(r1._same(r2))
+
+        # test union_cols
+        ds = dataset.union_cols(dataset).union_cols(dataset)
+        for s, count in ds.aggregate_cols(counts=agg.counter(ds.s)).counts.items():
+            self.assertEqual(count, 3)
+
+    def test_index(self):
+        ds = self.get_vds(min_partitions=8)
+        self.assertEqual(ds.num_partitions(), 8)
+        ds = ds.index_rows('rowidx').index_cols('colidx')
+
+        for i, struct in enumerate(ds.cols_table().select('colidx').collect()):
+            self.assertEqual(i, struct.colidx)
+        for i, struct in enumerate(ds.rows_table().select('rowidx').collect()):
+            self.assertEqual(i, struct.rowidx)
+
+    def test_reorder_columns(self):
+        ds = self.get_vds()
+        new_sample_order = [x.s for x in ds.cols_table().select("s").collect()]
+        random.shuffle(new_sample_order)
+        self.assertEqual([x.s for x in ds.reorder_columns(new_sample_order).cols_table().select("s").collect()], new_sample_order)
+
+    def test_computed_key_join_1(self):
+        ds = self.get_vds()
+        kt = Table.parallelize(
+            [{'key': 0, 'value': True},
+             {'key': 1, 'value': False}],
+            TStruct(['key', 'value'],
+                    [TInt32(), TBoolean()]),
+            key=['key'])
+        ds = ds.annotate_rows(key = ds.v.start % 2)
+        ds = ds.annotate_rows(value = kt[ds.key].value)
+        rt = ds.rows_table()
+        self.assertTrue(
+            rt.forall(((rt.v.start % 2) == 0) == rt.value))
+
+    def test_computed_key_join_2(self):
+        # multiple keys
+        ds = self.get_vds()
+        kt = Table.parallelize(
+            [{'key1': 0, 'key2': 0, 'value': 0},
+             {'key1': 1, 'key2': 0, 'value': 1},
+             {'key1': 0, 'key2': 1, 'value': -2},
+             {'key1': 1, 'key2': 1, 'value': -1}],
+            TStruct(['key1', 'key2', 'value'],
+                    [TInt32(), TInt32(), TInt32()]),
+            key=['key1', 'key2'])
+        ds = ds.annotate_rows(key1 = ds.v.start % 2, key2 = ds.info.DP % 2)
+        ds = ds.annotate_rows(value = kt[ds.key1, ds.key2].value)
+        rt = ds.rows_table()
+        self.assertTrue(
+            rt.forall((rt.v.start % 2) - 2 * (rt.info.DP % 2) == rt.value))
+
+    def test_computed_key_join_3(self):
+        # duplicate row keys
+        ds = self.get_vds()
+        kt = Table.parallelize(
+            [{'culprit': 'InbreedingCoeff', 'value': 'IB'}],
+            TStruct(['culprit', 'value'],
+                    [TString(), TString()]),
+            key=['culprit'])
+        ds = ds.annotate_rows(
+            info = ds.info.annotate(culprit = [ds.info.culprit, "foo"]))
+        ds = ds.explode_rows(ds.info.culprit)
+        ds = ds.annotate_rows(value = kt[ds.info.culprit].value)
+        rt = ds.rows_table()
+        self.assertTrue(
+            rt.forall(functions.cond(
+                rt.info.culprit == "InbreedingCoeff",
+                rt.value == "IB",
+                functions.is_missing(rt.value))))
+
+    def test_vcf_regression(self):
+        ds = hc.import_vcf(test_file('33alleles.vcf'))
+        self.assertEqual(
+            ds.filter_rows(ds.v.num_alleles() == 2).count_rows(), 0)
 
 class FunctionsTests(unittest.TestCase):
     def test(self):
@@ -600,11 +719,11 @@ class ColumnTests(unittest.TestCase):
         result = convert_struct_to_dict(kt.annotate(
             x1=kt.a['cat'],
             x2=kt.a['dog'],
-            x3=kt.a.keys().contains('rabbit'),
+            x3=list(kt.a.keys()).contains('rabbit'),
             x4=kt.a.size() == 0,
             x5=kt.a.key_set(),
-            x6=kt.a.keys(),
-            x7=kt.a.values(),
+            x6=list(kt.a.keys()),
+            x7=list(kt.a.values()),
             x8=kt.a.size(),
             x9=kt.a.map_values(lambda v: v * 2.0)
         ).to_hail1().take(1)[0])
@@ -617,14 +736,14 @@ class ColumnTests(unittest.TestCase):
 
     def test_numeric_conversion(self):
         schema = TStruct(['a', 'b', 'c', 'd'], [TFloat64(), TFloat64(), TInt32(), TInt64()])
-        rows = [{'a': 2.0, 'b': 4.0, 'c': 1, 'd': long(5)}]
+        rows = [{'a': 2.0, 'b': 4.0, 'c': 1, 'd': int(5)}]
         kt = Table.parallelize(rows, schema)
 
-        kt = kt.annotate(x1=[1.0, kt.a, 1, long(1)],
+        kt = kt.annotate(x1=[1.0, kt.a, 1, int(1)],
                          x2=[1, 1.0],
                          x3=[kt.a, kt.c],
                          x4=[kt.c, kt.d],
-                         x5=[1, kt.c, long(1)])
+                         x5=[1, kt.c, int(1)])
 
         expected_schema = {'a': TFloat64(), 'b': TFloat64(), 'c': TInt32(), 'd': TInt64(),
                            'x1': TArray(TFloat64()), 'x2': TArray(TFloat64()), 'x3': TArray(TFloat64()),
@@ -636,7 +755,7 @@ class ColumnTests(unittest.TestCase):
         rg = GenomeReference("foo", ["1"], {"1": 100})
 
         schema = TStruct(['a', 'b', 'c', 'd'], [TFloat64(), TFloat64(), TInt32(), TInt64()])
-        rows = [{'a': 2.0, 'b': 4.0, 'c': 1, 'd': long(5)}]
+        rows = [{'a': 2.0, 'b': 4.0, 'c': 1, 'd': int(5)}]
         kt = Table.parallelize(rows, schema)
 
         kt = kt.annotate(v1=functions.parse_variant("1:500:A:T", reference_genome=rg),
@@ -650,6 +769,37 @@ class ColumnTests(unittest.TestCase):
 
         expected_schema = {'a': TFloat64(), 'b': TFloat64(), 'c': TInt32(), 'd': TInt64(), 'v1': TVariant(rg),
                            'v2': TVariant(rg), 'v3': TVariant(rg), 'l1': TLocus(), 'l2': TLocus(rg),
-                           'i1': TInterval(rg), 'i2': TInterval(rg)}
+                           'i1': TInterval(TLocus(rg)), 'i2': TInterval(TLocus(rg))}
 
         self.assertTrue(all([expected_schema[fd.name] == fd.typ for fd in kt.schema.fields]))
+
+class ContextTests(unittest.TestCase):
+    def test_imports(self):
+        hc.index_bgen(test_file('example.v11.bgen'))
+
+        bgen = hc.import_bgen(test_file('example.v11.bgen'),
+                              sample_file=test_file('example.sample'),
+                              contig_recoding={"01": "1"}).rows_table()
+        self.assertTrue(bgen.forall(bgen.v.contig == "1"))
+        self.assertEqual(bgen.count(), 199)
+
+        gen = hc.import_gen(test_file('example.gen'),
+                            sample_file=test_file('example.sample'),
+                            contig_recoding={"01": "1"}).rows_table()
+        self.assertTrue(gen.forall(gen.v.contig == "1"))
+        self.assertEqual(gen.count(), 199)
+
+        vcf = hc.import_vcf(test_file('sample2.vcf'),
+                            reference_genome=GenomeReference.GRCh38(),
+                            contig_recoding={"22": "chr22"}).to_hail1().split_multi_hts()
+
+        vcf.export_plink('/tmp/sample_plink')
+
+        vcf_table = vcf.to_hail2().rows_table()
+        self.assertTrue(vcf_table.forall(vcf_table.v.contig == "chr22"))
+
+        bfile = '/tmp/sample_plink'
+        plink = hc.import_plink(
+            bfile + '.bed', bfile + '.bim', bfile + '.fam', a2_reference=True, contig_recoding={'chr22': '22'}).rows_table()
+        self.assertTrue(plink.forall(plink.v.contig == "22"))
+        self.assertEqual(vcf_table.count(), plink.count())

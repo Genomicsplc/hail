@@ -1,8 +1,6 @@
+from __future__ import absolute_import
 import unittest
-
-import sys
-from hail.typecheck.check import *
-from hail.py3_compat import *
+from .check import *
 
 
 class ContextTests(unittest.TestCase):
@@ -123,7 +121,7 @@ class ContextTests(unittest.TestCase):
             pass
 
         f(1)
-        f(long(1))
+        f(1)
         self.assertRaises(TypeError, lambda: f(1.1))
 
         # check numeric
@@ -133,7 +131,7 @@ class ContextTests(unittest.TestCase):
 
         f(1)
         f(1.0)
-        f(long(1))
+        f(1)
         self.assertRaises(TypeError, lambda: f('1.1'))
 
         # check strlike
@@ -251,3 +249,17 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(a, 'int')
         self.assertEqual(b, [{'5': 'int', '6': 'str'}, {'10': 'int'}])
 
+
+    def test_function_checker(self):
+
+        @typecheck(f=func_spec(3, int))
+        def foo(f):
+            return f(1, 2, 3)
+
+        l1 = lambda: 5
+        l2 = 5
+        l3 = lambda x, y, z: x + y + z
+
+        self.assertRaises(TypeError, lambda: foo(l1))
+        self.assertRaises(TypeError, lambda: foo(l2))
+        foo(l3)

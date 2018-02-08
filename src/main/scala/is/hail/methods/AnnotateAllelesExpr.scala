@@ -1,7 +1,8 @@
 package is.hail.methods
 
 import is.hail.annotations._
-import is.hail.expr.{EvalContext, Parser, TAggregable, TArray, TString}
+import is.hail.expr.types._
+import is.hail.expr.{EvalContext, Parser}
 import is.hail.rvd.OrderedRVD
 import is.hail.utils.ArrayBuilder
 import is.hail.variant.{MatrixTable, Variant}
@@ -30,7 +31,7 @@ object AnnotateAllelesExpr {
 
     val inserterBuilder = new ArrayBuilder[Inserter]()
     val newType = (paths, types).zipped.foldLeft(vsm.vaSignature) { case (vas, (ids, signature)) =>
-      val (s, i) = vas.insert(TArray(signature), ids)
+      val (s, i) = vas.structInsert(TArray(signature), ids)
       inserterBuilder += i
       s
     }
@@ -40,15 +41,15 @@ object AnnotateAllelesExpr {
     val aggregateOption = Aggregators.buildVariantAggregations(vsm.sparkContext, splitMatrixType, vsm.value.localValue, ec)
 
     val localNSamples = vsm.nSamples
-    val localRowType = vsm.rowType
+    val localRowType = vsm.rvRowType
 
     val localGlobalAnnotation = vsm.globalAnnotation
     val localVAnnotator = splitmulti.vAnnotator
     val localGAnnotator = splitmulti.gAnnotator
-    val splitRowType = splitMatrixType.rowType
+    val splitRowType = splitMatrixType.rvRowType
 
     val newMatrixType = vsm.matrixType.copy(vaType = newType)
-    val newRowType = newMatrixType.rowType
+    val newRowType = newMatrixType.rvRowType
 
     val newRDD2 = OrderedRVD(
       newMatrixType.orderedRVType,

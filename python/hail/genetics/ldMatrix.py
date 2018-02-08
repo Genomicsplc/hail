@@ -1,3 +1,4 @@
+from __future__ import absolute_import
 from hail.history import *
 from hail.typecheck import *
 from hail.utils.java import *
@@ -21,7 +22,7 @@ class LDMatrix(HistoryMixin):
         """
         jvars = self._jldm.variants()
 
-        return list(map(lambda jrep: hail.genetics.Variant._from_java(jrep, self._rg), jvars))
+        return list([hail.genetics.Variant._from_java(jrep, self._rg) for jrep in jvars])
 
     def matrix(self):
         """

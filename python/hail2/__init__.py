@@ -1,3 +1,4 @@
+from __future__ import absolute_import
 import hail.expr.functions as functions
 import hail.expr.aggregators as agg
 import hail.methods as methods
@@ -7,7 +8,6 @@ from hail.expr import Type, TInt32, TInt64, TFloat32, TFloat64, TString, TBoolea
 from hail.genetics import LDMatrix, KinshipMatrix, Variant, Locus, AltAllele, Interval, Call, Pedigree, Trio, \
     GenomeReference
 from hail.utils import Struct, hadoop_write, hadoop_read, hadoop_copy
-from hail.utils import hadoop_read, hadoop_write, hadoop_copy
 from hail.api2 import MatrixTable, Table, HailContext, asc, desc
 
 __all__ = ['HailContext',

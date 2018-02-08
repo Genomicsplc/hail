@@ -4,7 +4,7 @@ import is.hail.SparkSuite
 import is.hail.annotations.Annotation
 import is.hail.check.Prop._
 import is.hail.check.{Gen, Properties}
-import is.hail.expr.{TFloat64, TInt32, TString}
+import is.hail.expr.types._
 import is.hail.io.vcf.ExportVCF
 import is.hail.utils.AbsoluteFuzzyComparable._
 import is.hail.utils.{AbsoluteFuzzyComparable, TextTableReader, _}
@@ -98,11 +98,11 @@ class IBDSuite extends SparkSuite {
   }
 
   object Spec extends Properties("IBD") {
-    val plinkSafeBiallelicVDS = MatrixTable.gen(hc, VSMSubgen.plinkSafeBiallelic)
+    val plinkSafeBiallelicVDS = MatrixTable.gen(hc, VSMSubgen.plinkSafeBiallelic.copy(vSigGen = Gen.const(TVariant(GenomeReference.GRCh37))))
       .resize(1000)
       .map { vds =>
         val gr = vds.genomeReference
-        vds.filterVariants { case (v, va, gs) => v.asInstanceOf[Variant].isAutosomalOrPseudoAutosomal(gr) }
+        vds.filterVariants { case (v, va, gs) => v.asInstanceOf[Variant].isAutosomal(gr) }
       }
       .filter(vds => vds.countVariants > 2 && vds.nSamples >= 2)
 

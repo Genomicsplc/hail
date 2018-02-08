@@ -3,6 +3,7 @@ package is.hail.methods
 import breeze.linalg.{*, DenseMatrix, DenseVector}
 import is.hail.annotations._
 import is.hail.expr._
+import is.hail.expr.types._
 import is.hail.table.Table
 import is.hail.utils._
 import is.hail.variant.MatrixTable
@@ -32,6 +33,7 @@ object PCA {
       val localRowType = rowTypeBc.value
 
       it.map { case (s, i) =>
+        region.clear()
         rvb.start(localRowType)
         rvb.startStruct()
         rvb.addAnnotation(rowType.fieldType(0), s)
@@ -77,6 +79,7 @@ object PCA {
         val rv = RegionValue(region)
         val rvb = new RegionValueBuilder(region)
         it.map { ir =>
+          region.clear()
           rvb.start(rowTypeBc.value)
           rvb.startStruct()
           rvb.addAnnotation(rowTypeBc.value.fieldType(0), variantsBc.value(ir.index.toInt))
