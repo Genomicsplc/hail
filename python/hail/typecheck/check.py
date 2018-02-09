@@ -1,6 +1,6 @@
 from __future__ import absolute_import
 from decorator import decorator, getargspec
-from types import ClassType, NoneType, InstanceType
+from types import ClassType, InstanceType
 import re
 import inspect
 import six
@@ -322,7 +322,7 @@ def enumeration(*args):
 
 
 def nullable(t):
-    return oneof(t, NoneType)
+    return oneof(t, type(None))
 
 
 def listof(t):
@@ -359,7 +359,7 @@ def lazy():
     return LazyChecker()
 
 
-none = only(NoneType)
+none = only(type(None))
 
 anytype = AnyChecker()
 
