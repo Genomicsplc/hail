@@ -1,6 +1,6 @@
 from __future__ import absolute_import
 from decorator import decorator, getargspec
-from types import ClassType, InstanceType
+from types import ClassType
 import re
 import inspect
 import six
